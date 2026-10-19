@@ -1,0 +1,18 @@
+%%%-------------------------------------------------------------------
+%% @doc hayata public API
+%% @end
+%%%-------------------------------------------------------------------
+
+-module(hayata_app).
+
+-behaviour(application).
+
+-export([start/2, stop/1]).
+
+start(_StartType, _StartArgs) ->
+    hayata_sup:start_link().
+
+stop(_State) ->
+    ok.
+
+%% internal functions
