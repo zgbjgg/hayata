@@ -10,7 +10,8 @@
     replace_state/2,
     update_state/2,
     set_edges/2,
-    track_edge/3
+    track_edge/3,
+    start_edge/4
 ]).
 
 -export([
@@ -29,6 +30,7 @@
     local_state = #{},
     edges = [],
     active_edges = #{},
+    edge_results = #{},
     last_edge_event = undefined
 }).
 
@@ -104,6 +106,19 @@ set_edges(Server, Edges) when is_list(Edges) ->
 track_edge(Server, EdgeId, EdgePid) when is_pid(EdgePid) ->
     gen_server:call(Server, {track_edge, EdgeId, EdgePid}).
 
+-doc("Starts, monitors, registers, and asynchronously executes an edge.").
+-spec start_edge(
+    gen_server:server_ref(),
+    edge_id(),
+    term(),
+    fun(() -> term())
+) -> {ok, pid()} | {error, term()}.
+start_edge(Node, EdgeId, ExecutionId, TaskFun) ->
+    gen_server:call(
+        Node,
+        {start_edge, EdgeId, ExecutionId, TaskFun}
+    ).
+
 %% gen_server callbacks
 
 -doc(false).
@@ -134,6 +149,7 @@ handle_call(get_info, _From, State) ->
         local_state => State#node_state.local_state,
         edges => State#node_state.edges,
         active_edges => State#node_state.active_edges,
+        edge_results => State#node_state.edge_results,
         last_edge_event => State#node_state.last_edge_event
     },
     {reply, Info, State};
@@ -154,6 +170,7 @@ handle_call({track_edge, EdgeId, EdgePid}, _From, State) ->
     MonitorRef = erlang:monitor(process, EdgePid),
     Edge = #{
         edge_id => EdgeId,
+        execution_id => undefined,
         pid => EdgePid
     },
     ActiveEdges = maps:put(
@@ -163,6 +180,33 @@ handle_call({track_edge, EdgeId, EdgePid}, _From, State) ->
     ),
     NewNodeState = State#node_state{active_edges = ActiveEdges},
     {reply, {ok, MonitorRef}, NewNodeState};
+handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
+    case hayata_edge:start(
+        self(),
+        EdgeId,
+        ExecutionId,
+        TaskFun
+    ) of
+        {ok, EdgePid} ->
+            MonitorRef = erlang:monitor(process, EdgePid),
+            Edge = #{
+                edge_id => EdgeId,
+                execution_id => ExecutionId,
+                pid => EdgePid
+            },
+            ActiveEdges = maps:put(
+                MonitorRef,
+                Edge,
+                State#node_state.active_edges
+            ),
+            NewState = State#node_state{
+                active_edges = ActiveEdges
+            },
+            ok = hayata_edge:execute(EdgePid),
+            {reply, {ok, EdgePid}, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -175,23 +219,40 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #node_state{}) ->
     {noreply, #node_state{}}.
+
+handle_info(
+    {hayata_edge_result, EdgeId, ExecutionId, Result},
+    State
+) ->
+    ResultKey = {EdgeId, ExecutionId},
+    EdgeResults = maps:put(
+        ResultKey,
+        Result,
+        State#node_state.edge_results
+    ),
+    NewState = State#node_state{
+        edge_results = EdgeResults
+    },
+    {noreply, NewState};
 handle_info(
     {'DOWN', MonitorRef, process, EdgePid, Reason},
     State
 ) ->
     ActiveEdges = State#node_state.active_edges,
     case maps:take(MonitorRef, ActiveEdges) of
-        {#{pid := EdgePid, edge_id := EdgeId}, RemainingEdges} ->
+        {#{pid := EdgePid, edge_id := EdgeId,
+           execution_id := ExecutionId}, RemainingEdges} ->
             Event = #{
                 edge_id => EdgeId,
+                execution_id => ExecutionId,
                 pid => EdgePid,
                 reason => Reason
             },
-            NewNodeState = State#node_state{
+            NewState = State#node_state{
                 active_edges = RemainingEdges,
                 last_edge_event = Event
             },
-            {noreply, NewNodeState};
+            {noreply, NewState};
         error ->
             {noreply, State}
     end;

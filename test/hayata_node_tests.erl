@@ -115,6 +115,21 @@ edge_down_test() ->
         await_edge_down(Node, 100)
     end).
 
+start_edge_test() ->
+    with_node(make_ref(), think_01, think, #{status => idle}, [], fun(Node) ->
+        {ok, EdgePid} = hayata_node:start_edge(
+            Node,
+            edge_01,
+            execution_01,
+            fun() -> {ok, result_01} end
+        ),
+
+        ?assert(is_pid(EdgePid)),
+
+        await_edge_result(Node, {edge_01, execution_01}, 100),
+        await_edge_termination(Node, edge_01, execution_01, 100)
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -130,7 +145,6 @@ await_edge_down(Node, Attempts) ->
             await_edge_down(Node, Attempts - 1)
     end.
 
-
 with_node(AgentId, NodeId, Name, InitialState, Edges, TestFun) ->
     {ok, Node} = hayata_node:start_link(
         AgentId,
@@ -143,4 +157,40 @@ with_node(AgentId, NodeId, Name, InitialState, Edges, TestFun) ->
         TestFun(Node)
     after
         gen_server:stop(Node)
+    end.
+
+await_edge_result(_Node, _Key, 0) ->
+    error(edge_result_timeout);
+await_edge_result(Node, Key, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Results = maps:get(edge_results, Info),
+    case maps:find(Key, Results) of
+        {ok, {ok, result_01}} ->
+            ok;
+        error ->
+            timer:sleep(10),
+            await_edge_result(Node, Key, Attempts - 1);
+        _ ->
+            error(unexpected_edge_result)
+    end.
+
+await_edge_termination(_Node, _EdgeId, _ExecutionId, 0) ->
+    error(edge_termination_timeout);
+await_edge_termination(Node, EdgeId, ExecutionId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    ActiveEdges = maps:get(active_edges, Info),
+    LastEvent = maps:get(last_edge_event, Info),
+    case {map_size(ActiveEdges), LastEvent} of
+        {0, #{edge_id := EdgeId,
+              execution_id := ExecutionId,
+              reason := normal}} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_edge_termination(
+                Node,
+                EdgeId,
+                ExecutionId,
+                Attempts - 1
+            )
     end.
