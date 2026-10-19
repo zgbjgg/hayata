@@ -66,6 +66,71 @@ set_edges_test() ->
         ?assertEqual(Edges, maps:get(edges, hayata_node:get_info(Node)))
     end).
 
+
+track_edge_test() ->
+    with_node(make_ref(), think_01, think, #{status => idle}, [], fun(Node) ->
+        EdgePid = spawn(fun() ->
+            receive
+                stop -> ok
+            end
+        end),
+
+        {ok, MonitorRef} = hayata_node:track_edge(Node, edge_01, EdgePid),
+
+        Info = hayata_node:get_info(Node),
+        ActiveEdges = maps:get(active_edges, Info),
+
+        ?assertMatch(
+            #{edge_id := edge_01, pid := EdgePid},
+            maps:get(MonitorRef, ActiveEdges)
+        ),
+
+        EdgePid ! stop
+    end).
+
+edge_down_test() ->
+    with_node(make_ref(), think_01, think, #{status => idle}, [], fun(Node) ->
+        Parent = self(),
+        EdgePid = spawn(fun() ->
+            Parent ! {edge_ready, self()},
+            receive
+                stop -> ok
+            end
+        end),
+
+        receive
+            {edge_ready, EdgePid} -> ok
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        {ok, _MonitorRef} = hayata_node:track_edge(Node, edge_02, EdgePid),
+        EdgePid ! stop,
+
+        ?assertEqual(
+            #{status => idle},
+            hayata_node:get_state(Node)
+        ),
+
+        await_edge_down(Node, 100)
+    end).
+
+await_edge_down(_Node, 0) ->
+    error(edge_down_timeout);
+await_edge_down(Node, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    ActiveEdges = maps:get(active_edges, Info),
+    LastEvent = maps:get(last_edge_event, Info),
+
+    case {map_size(ActiveEdges), LastEvent} of
+        {0, #{edge_id := edge_02, reason := normal}} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_edge_down(Node, Attempts - 1)
+    end.
+
+
 with_node(AgentId, NodeId, Name, InitialState, Edges, TestFun) ->
     {ok, Node} = hayata_node:start_link(
         AgentId,
