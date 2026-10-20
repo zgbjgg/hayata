@@ -343,6 +343,70 @@ repeated_reducer_failure_test() ->
         EdgePid ! continue
     end).
 
+
+reducer_recovery_preserves_deadline_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        TimeoutMs = 600,
+        StartedAt = erlang:monotonic_time(millisecond),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_deadline},
+            hayata_node:start_execution(
+                Node,
+                execution_deadline,
+                EdgeTasks,
+                TimeoutMs
+            )
+        ),
+
+        _EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        timer:sleep(350),
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := OriginalReducer} = maps:get(
+            execution_deadline,
+            ActiveReducers
+        ),
+
+        exit(OriginalReducer, kill),
+
+        _ReplacementReducer = await_replacement_reducer(
+            Node,
+            execution_deadline,
+            OriginalReducer,
+            100
+        ),
+
+        await_execution_status(
+            Node,
+            execution_deadline,
+            timed_out,
+            100
+        ),
+
+        ElapsedMs = erlang:monotonic_time(millisecond) - StartedAt,
+
+        ?assert(
+            ElapsedMs < TimeoutMs + 400
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -471,6 +535,26 @@ await_recovery_failed(Node, ExecutionId, Attempts) ->
             await_recovery_failed(
                 Node,
                 ExecutionId,
+                Attempts - 1
+            )
+    end.
+
+
+await_execution_status(_Node, _ExecutionId, _Status, 0) ->
+    error(execution_status_timeout);
+await_execution_status(Node, ExecutionId, Status, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Executions = maps:get(executions, Info),
+    Execution = maps:get(ExecutionId, Executions),
+    case maps:get(status, Execution) of
+        Status ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_execution_status(
+                Node,
+                ExecutionId,
+                Status,
                 Attempts - 1
             )
     end.
