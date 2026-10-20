@@ -412,6 +412,60 @@ reducer_recovery_preserves_deadline_test() ->
         )
     end).
 
+
+edge_crash_during_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_edge_crash},
+            hayata_node:start_execution(
+                Node,
+                execution_edge_crash,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        exit(EdgePid, kill),
+
+        await_execution_error(
+            Node,
+            execution_edge_crash,
+            edge_01,
+            200
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(execution_edge_crash, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertMatch(
+            #{edge_01 := _},
+            maps:get(errors, Execution)
+        ),
+        ?assertEqual(
+            [],
+            maps:get(pending_edges, Execution)
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -560,6 +614,27 @@ await_execution_status(Node, ExecutionId, Status, Attempts) ->
                 Node,
                 ExecutionId,
                 Status,
+                Attempts - 1
+            )
+    end.
+
+
+await_execution_error(_Node, _ExecutionId, _EdgeId, 0) ->
+    error(execution_error_timeout);
+await_execution_error(Node, ExecutionId, EdgeId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Executions = maps:get(executions, Info),
+    Execution = maps:get(ExecutionId, Executions),
+    Errors = maps:get(errors, Execution),
+    case maps:is_key(EdgeId, Errors) of
+        true ->
+            ok;
+        false ->
+            timer:sleep(10),
+            await_execution_error(
+                Node,
+                ExecutionId,
+                EdgeId,
                 Attempts - 1
             )
     end.
