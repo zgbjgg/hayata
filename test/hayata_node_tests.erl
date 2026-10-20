@@ -466,6 +466,90 @@ edge_crash_during_execution_test() ->
         )
     end).
 
+
+edge_result_preserved_after_down_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                {ok, result_01}
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_result_then_down},
+            hayata_node:start_execution(
+                Node,
+                execution_result_then_down,
+                EdgeTasks,
+                1000
+            )
+        ),
+
+        await_execution_completed(
+            Node,
+            execution_result_then_down,
+            100
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(
+            execution_result_then_down,
+            Executions
+        ),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, result_01}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution))
+    end).
+
+
+duplicate_edge_result_preserves_first_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                {ok, first_result}
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_duplicate_result},
+            hayata_node:start_execution(
+                Node,
+                execution_duplicate_result,
+                EdgeTasks,
+                1000
+            )
+        ),
+
+        await_execution_completed(
+            Node,
+            execution_duplicate_result,
+            100
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(
+            execution_duplicate_result,
+            Executions
+        ),
+
+        ?assertEqual(
+            {ok, first_result},
+            maps:get(edge_01, maps:get(results, Execution))
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
