@@ -210,6 +210,82 @@ invalid_execution_test() ->
         )
     end).
 
+
+reducer_recovery_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        FirstRuns = atomics:new(1, []),
+        SecondRuns = atomics:new(1, []),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                atomics:add(FirstRuns, 1, 1),
+                {ok, first_result}
+            end},
+            {edge_02, fun() ->
+                atomics:add(SecondRuns, 1, 1),
+                Parent ! {second_edge_started, self()},
+                receive
+                    continue -> {ok, second_result}
+                end
+            end}
+        ],
+
+        {ok, execution_recovery} = hayata_node:start_execution(
+            Node,
+            execution_recovery,
+            EdgeTasks,
+            5000
+        ),
+
+        await_execution_result(Node, edge_01, 100),
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := OriginalReducer} = maps:get(
+            execution_recovery,
+            ActiveReducers
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            execution_recovery,
+            OriginalReducer,
+            100
+        ),
+
+        ?assert(is_pid(ReplacementReducer)),
+        ?assertNotEqual(OriginalReducer, ReplacementReducer),
+
+        SecondEdgePid = receive
+            {second_edge_started, Pid} -> Pid
+        after 1000 ->
+            error(second_edge_start_timeout)
+        end,
+
+        SecondEdgePid ! continue,
+
+        await_execution_completed(Node, execution_recovery, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(execution_recovery, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            {ok, first_result},
+            maps:get(edge_01, maps:get(results, Execution))
+        ),
+        ?assertEqual(
+            {ok, second_result},
+            maps:get(edge_02, maps:get(results, Execution))
+        ),
+        ?assertEqual(1, atomics:get(FirstRuns, 1)),
+        ?assertEqual(1, atomics:get(SecondRuns, 1))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -273,4 +349,52 @@ await_edge_termination(Node, EdgeId, ExecutionId, Attempts) ->
                 ExecutionId,
                 Attempts - 1
             )
+    end.
+
+
+await_execution_result(_Node, _EdgeId, 0) ->
+    error(execution_result_timeout);
+await_execution_result(Node, EdgeId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Executions = maps:get(executions, Info),
+    Execution = maps:get(execution_recovery, Executions),
+    Results = maps:get(results, Execution),
+    case maps:is_key(EdgeId, Results) of
+        true ->
+            ok;
+        false ->
+            timer:sleep(10),
+            await_execution_result(Node, EdgeId, Attempts - 1)
+    end.
+
+await_replacement_reducer(_Node, _ExecutionId, _OriginalPid, 0) ->
+    error(reducer_recovery_timeout);
+await_replacement_reducer(Node, ExecutionId, OriginalPid, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    ActiveReducers = maps:get(active_reducers, Info),
+    case maps:find(ExecutionId, ActiveReducers) of
+        {ok, #{pid := Pid, recovered := true}} when Pid =/= OriginalPid ->
+            Pid;
+        _ ->
+            timer:sleep(10),
+            await_replacement_reducer(
+                Node,
+                ExecutionId,
+                OriginalPid,
+                Attempts - 1
+            )
+    end.
+
+await_execution_completed(_Node, _ExecutionId, 0) ->
+    error(execution_completion_timeout);
+await_execution_completed(Node, ExecutionId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Executions = maps:get(executions, Info),
+    Execution = maps:get(ExecutionId, Executions),
+    case maps:get(status, Execution) of
+        completed ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_execution_completed(Node, ExecutionId, Attempts - 1)
     end.
