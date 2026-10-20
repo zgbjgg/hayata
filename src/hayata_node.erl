@@ -417,6 +417,7 @@ start_execution_reducer(
         status => starting,
         edge_ids => edge_ids(EdgeTasks),
         timeout_ms => TimeoutMs,
+        deadline => erlang:monotonic_time(millisecond) + TimeoutMs,
         results => #{},
         errors => #{}
     },
@@ -687,11 +688,13 @@ recover_execution_reducer(ExecutionId, Reason, State) ->
     BaseState = State#node_state{
         active_reducers = ActiveReducers
     },
+    Deadline = maps:get(deadline, Execution),
+    RemainingMs = max(0, Deadline - erlang:monotonic_time(millisecond)),
     Config = #{
         node_pid => self(),
         execution_id => ExecutionId,
         expected_edges => maps:get(edge_ids, Execution),
-        timeout_ms => maps:get(timeout_ms, Execution),
+        timeout_ms => RemainingMs,
         results => maps:get(results, Execution),
         errors => maps:get(errors, Execution)
     },
