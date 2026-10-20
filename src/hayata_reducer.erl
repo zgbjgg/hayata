@@ -48,11 +48,6 @@ init(Config) ->
     case validate_config(Config) of
         {ok, NodePid, ExecutionId, ExpectedEdges,
          Results, Errors, TimeoutMs} ->
-            TimeoutRef = erlang:send_after(
-                TimeoutMs,
-                self(),
-                {reducer_timeout, ExecutionId}
-            ),
             {ok, #reducer_state{
                 node_pid = NodePid,
                 execution_id = ExecutionId,
