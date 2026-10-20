@@ -29,4 +29,4 @@ jobs:
       with:
         token: ${{ secrets.CODECOV_TOKEN }}
         slug: zgbjgg/hayata
-        file: _build/test/cover/eunit.coverdata
+        file: codecov.json 
