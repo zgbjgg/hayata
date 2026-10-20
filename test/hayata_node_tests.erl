@@ -535,7 +535,6 @@ edge_result_preserved_after_down_test() ->
         end
     end).
 
-
 duplicate_edge_result_preserves_first_test() ->
     with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
         Parent = self(),
@@ -597,6 +596,54 @@ duplicate_edge_result_preserves_first_test() ->
         after
             exit(EdgePid, kill)
         end
+    end).
+
+duplicate_reducer_result_preserves_terminal_state_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        TaskFun = fun() ->
+            receive
+                release_edge ->
+                    first_result
+            end
+        end,
+
+        ExecutionId = execution_duplicate_final_result,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            [{edge_01, TaskFun}],
+            5000
+        ),
+
+        FirstResult = #{
+            status => completed,
+            results => #{edge_01 => {ok, first_result}},
+            errors => #{},
+            pending_edges => []
+        },
+
+        DuplicateResult = #{
+            status => completed,
+            results => #{edge_01 => {ok, duplicate_result}},
+            errors => #{edge_02 => duplicate_error},
+            pending_edges => [edge_03]
+        },
+
+        Node ! {hayata_reducer_result, ExecutionId, FirstResult},
+        Node ! {hayata_reducer_result, ExecutionId, DuplicateResult},
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, first_result}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution))
     end).
 
 await_edge_down(_Node, 0) ->

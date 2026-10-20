@@ -608,6 +608,7 @@ update_new_execution_result(Execution, EdgeId, Result, State) ->
         {error, {invalid_edge_result, Result}},
         State
     ).
+
 -spec save_execution(map(), #node_state{}) -> #node_state{}.
 save_execution(Execution, State) ->
     ExecutionId = maps:get(execution_id, Execution),
@@ -621,31 +622,49 @@ save_execution(Execution, State) ->
 -spec complete_execution(term(), map(), #node_state{}) -> #node_state{}.
 complete_execution(ExecutionId, FinalResult, State) ->
     case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, #{status := Status}}
+                when Status =:= completed;
+                     Status =:= timed_out ->
+            State;
         {ok, Execution} ->
-            Results = maps:get(results, FinalResult, #{}),
-            Errors = maps:get(errors, FinalResult, #{}),
-            {FinalResults, FinalErrors} = case map_size(Results) of
-                0 ->
-                    recover_execution_results(
-                        ExecutionId,
-                        State#node_state.edge_results,
-                        Results,
-                        Errors
-                    );
-                _ ->
-                    {Results, Errors}
-            end,
-            UpdatedExecution = Execution#{
-                status => maps:get(status, FinalResult),
-                results => FinalResults,
-                errors => FinalErrors,
-                pending_edges => maps:get(pending_edges, FinalResult, [])
-            },
-            NewState = save_execution(UpdatedExecution, State),
-            remove_active_reducer(ExecutionId, NewState);
+            complete_execution_result(
+                ExecutionId,
+                Execution,
+                FinalResult,
+                State
+            );
         error ->
             State
     end.
+
+-spec complete_execution_result(
+    term(),
+    map(),
+    map(),
+    #node_state{}
+) -> #node_state{}.
+complete_execution_result(ExecutionId, Execution, FinalResult, State) ->
+    Results = maps:get(results, FinalResult, #{}),
+    Errors = maps:get(errors, FinalResult, #{}),
+    {FinalResults, FinalErrors} = case map_size(Results) of
+        0 ->
+            recover_execution_results(
+                ExecutionId,
+                State#node_state.edge_results,
+                Results,
+                Errors
+            );
+        _ ->
+            {Results, Errors}
+    end,
+    UpdatedExecution = Execution#{
+        status => maps:get(status, FinalResult),
+        results => FinalResults,
+        errors => FinalErrors,
+        pending_edges => maps:get(pending_edges, FinalResult, [])
+    },
+    NewState = save_execution(UpdatedExecution, State),
+    remove_active_reducer(ExecutionId, NewState).
 
 -spec remove_active_reducer(term(), #node_state{}) -> #node_state{}.
 remove_active_reducer(ExecutionId, State) ->
