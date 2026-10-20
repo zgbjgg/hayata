@@ -630,8 +630,14 @@ duplicate_reducer_result_preserves_terminal_state_test() ->
             pending_edges => [edge_03]
         },
 
-        Node ! {hayata_reducer_result, ExecutionId, FirstResult},
-        Node ! {hayata_reducer_result, ExecutionId, DuplicateResult},
+        InfoBefore = hayata_node:get_info(Node),
+
+        ActiveReducers = maps:get(active_reducers, InfoBefore),
+        Reducer = maps:get(ExecutionId, ActiveReducers),
+        ReducerPid = maps:get(pid, Reducer),
+
+        Node ! {hayata_reducer_result, ReducerPid, ExecutionId, FirstResult},
+        Node ! {hayata_reducer_result, ReducerPid, ExecutionId, DuplicateResult},
 
         Info = hayata_node:get_info(Node),
         Executions = maps:get(executions, Info),

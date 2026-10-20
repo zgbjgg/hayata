@@ -243,7 +243,12 @@ finish(Status, State) ->
         pending_edges => PendingEdges
     },
     State#reducer_state.node_pid !
-        {hayata_reducer_result, State#reducer_state.execution_id, FinalResult},
+        {
+            hayata_reducer_result,
+            self(),
+            State#reducer_state.execution_id,
+            FinalResult
+        },
     {stop, normal, State}.
 
 -spec cancel_timeout(reference() | undefined) -> ok.

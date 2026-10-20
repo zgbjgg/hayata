@@ -144,7 +144,7 @@ start_reducer(ExpectedEdges, TimeoutMs) ->
 
 receive_result() ->
     receive
-        {hayata_reducer_result, execution_01, Result} ->
+        {hayata_reducer_result, _Pid, execution_01, Result} ->
             Result
     after 1000 ->
         error(reducer_result_timeout)

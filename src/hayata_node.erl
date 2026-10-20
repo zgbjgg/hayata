@@ -285,8 +285,18 @@ handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
         Result,
         NewState
     )};
-handle_info({hayata_reducer_result, ExecutionId, FinalResult}, State) ->
-    {noreply, complete_execution(ExecutionId, FinalResult, State)};
+handle_info({hayata_reducer_result, ReducerPid, ExecutionId, FinalResult}, State) ->
+    case maps:find(ExecutionId, State#node_state.active_reducers) of
+        {ok, #{pid := ReducerPid}} ->
+            {noreply, complete_execution(
+                ExecutionId,
+                FinalResult,
+                State
+            )};
+
+        _ ->
+            {noreply, State}
+    end;
 handle_info({'DOWN', MonitorRef, process, EdgePid, Reason}, State) ->
     case maps:take(MonitorRef, State#node_state.active_edges) of
         {#{pid := EdgePid, edge_id := EdgeId,
