@@ -262,11 +262,17 @@ handle_cast(_Request, State) ->
     {noreply, #node_state{}}.
 handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
     ResultKey = {EdgeId, ExecutionId},
-    EdgeResults = maps:put(
-        ResultKey,
-        Result,
-        State#node_state.edge_results
-    ),
+    EdgeResults = case maps:is_key(ResultKey, State#node_state.edge_results) of
+        true ->
+            State#node_state.edge_results;
+
+        false ->
+            maps:put(
+                ResultKey,
+                Result,
+                State#node_state.edge_results
+            )
+    end,
     NewState = update_execution_edge_result(
         ExecutionId,
         EdgeId,
@@ -567,34 +573,41 @@ update_execution_edge_result(ExecutionId, EdgeId, Result, State) ->
             State
     end.
 
--spec update_execution_result(
-    map(),
-    term(),
-    term(),
-    #node_state{}
-) -> #node_state{}.
-update_execution_result(Execution, EdgeId, {ok, _Value} = Result, State) ->
+-spec update_execution_result(map(), term(), term(), #node_state{}) ->
+    #node_state{}.
+update_execution_result(Execution, EdgeId, Result, State) ->
+    Results = maps:get(results, Execution),
+    Errors = maps:get(errors, Execution),
+    case maps:is_key(EdgeId, Results) orelse maps:is_key(EdgeId, Errors) of
+        true ->
+            State;
+        false ->
+            update_new_execution_result(Execution, EdgeId, Result, State)
+    end.
+
+-spec update_new_execution_result(map(), term(), term(), #node_state{}) ->
+    #node_state{}.
+update_new_execution_result(Execution, EdgeId, {ok, _Value} = Result, State) ->
     Results = maps:put(EdgeId, Result, maps:get(results, Execution)),
     Errors = maps:remove(EdgeId, maps:get(errors, Execution)),
     save_execution(
         Execution#{results => Results, errors => Errors},
         State
     );
-update_execution_result(Execution, EdgeId, {error, Reason}, State) ->
+update_new_execution_result(Execution, EdgeId, {error, Reason}, State) ->
     Results = maps:remove(EdgeId, maps:get(results, Execution)),
     Errors = maps:put(EdgeId, Reason, maps:get(errors, Execution)),
     save_execution(
         Execution#{results => Results, errors => Errors},
         State
     );
-update_execution_result(Execution, EdgeId, Result, State) ->
-    update_execution_result(
+update_new_execution_result(Execution, EdgeId, Result, State) ->
+    update_new_execution_result(
         Execution,
         EdgeId,
         {error, {invalid_edge_result, Result}},
         State
     ).
-
 -spec save_execution(map(), #node_state{}) -> #node_state{}.
 save_execution(Execution, State) ->
     ExecutionId = maps:get(execution_id, Execution),
@@ -609,11 +622,24 @@ save_execution(Execution, State) ->
 complete_execution(ExecutionId, FinalResult, State) ->
     case maps:find(ExecutionId, State#node_state.executions) of
         {ok, Execution} ->
+            Results = maps:get(results, FinalResult, #{}),
+            Errors = maps:get(errors, FinalResult, #{}),
+            {FinalResults, FinalErrors} = case map_size(Results) of
+                0 ->
+                    recover_execution_results(
+                        ExecutionId,
+                        State#node_state.edge_results,
+                        Results,
+                        Errors
+                    );
+                _ ->
+                    {Results, Errors}
+            end,
             UpdatedExecution = Execution#{
                 status => maps:get(status, FinalResult),
-                results => maps:get(results, FinalResult),
-                errors => maps:get(errors, FinalResult),
-                pending_edges => maps:get(pending_edges, FinalResult)
+                results => FinalResults,
+                errors => FinalErrors,
+                pending_edges => maps:get(pending_edges, FinalResult, [])
             },
             NewState = save_execution(UpdatedExecution, State),
             remove_active_reducer(ExecutionId, NewState);
@@ -794,7 +820,6 @@ forward_recovered_edge_result(ExecutionId, EdgeId, Result, State) ->
             State
     end.
 
-
 -spec notify_reducer_edge_down(
     term(),
     term(),
@@ -816,3 +841,44 @@ notify_reducer_edge_down(EdgeId, ExecutionId, Reason, State) ->
         error ->
             {noreply, State}
     end.
+
+-spec recover_execution_results(term(), map(), map(), map()) ->
+    {map(), map()}.
+recover_execution_results(ExecutionId, EdgeResults, Results, Errors) ->
+    ExecutionEdgeResults = maps:fold(
+        fun
+            ({EdgeId, ResultExecutionId}, Result, Acc)
+                    when ResultExecutionId =:= ExecutionId ->
+                maps:put(EdgeId, Result, Acc);
+            (_Key, _Result, Acc) ->
+                Acc
+        end,
+        #{},
+        EdgeResults
+    ),
+    maps:fold(
+        fun
+            (EdgeId, {ok, _Value} = Result, {RecoveredResults, RecoveredErrors}) ->
+                {
+                    maps:put(EdgeId, Result, RecoveredResults),
+                    maps:remove(EdgeId, RecoveredErrors)
+                };
+            (EdgeId, {error, Reason}, {RecoveredResults, RecoveredErrors}) ->
+                {
+                    maps:remove(EdgeId, RecoveredResults),
+                    maps:put(EdgeId, Reason, RecoveredErrors)
+                };
+            (EdgeId, Result, Acc) ->
+                recover_invalid_edge_result(EdgeId, Result, Acc)
+        end,
+        {Results, Errors},
+        ExecutionEdgeResults
+    ).
+
+-spec recover_invalid_edge_result(term(), term(), {map(), map()}) ->
+    {map(), map()}.
+recover_invalid_edge_result(EdgeId, Result, {Results, Errors}) ->
+    {
+        maps:remove(EdgeId, Results),
+        maps:put(EdgeId, {invalid_edge_result, Result}, Errors)
+    }.
