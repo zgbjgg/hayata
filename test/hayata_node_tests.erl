@@ -238,7 +238,7 @@ reducer_recovery_test() ->
             5000
         ),
 
-        await_execution_result(Node, edge_01, 100),
+        await_execution_result(Node, execution_recovery, edge_01, 100),
 
         Info = hayata_node:get_info(Node),
         ActiveReducers = maps:get(active_reducers, Info),
@@ -284,6 +284,63 @@ reducer_recovery_test() ->
         ),
         ?assertEqual(1, atomics:get(FirstRuns, 1)),
         ?assertEqual(1, atomics:get(SecondRuns, 1))
+    end).
+
+
+repeated_reducer_failure_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_repeated_failure},
+            hayata_node:start_execution(
+                Node,
+                execution_repeated_failure,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := OriginalReducer} = maps:get(
+            execution_repeated_failure,
+            ActiveReducers
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            execution_repeated_failure,
+            OriginalReducer,
+            100
+        ),
+
+        exit(ReplacementReducer, kill),
+
+        await_recovery_failed(
+            Node,
+            execution_repeated_failure,
+            100
+        ),
+
+        EdgePid ! continue
     end).
 
 await_edge_down(_Node, 0) ->
@@ -352,19 +409,19 @@ await_edge_termination(Node, EdgeId, ExecutionId, Attempts) ->
     end.
 
 
-await_execution_result(_Node, _EdgeId, 0) ->
+await_execution_result(_Node, _ExecutionId, _EdgeId, 0) ->
     error(execution_result_timeout);
-await_execution_result(Node, EdgeId, Attempts) ->
+await_execution_result(Node, ExecutionId, EdgeId, Attempts) ->
     Info = hayata_node:get_info(Node),
     Executions = maps:get(executions, Info),
-    Execution = maps:get(execution_recovery, Executions),
+    Execution = maps:get(ExecutionId, Executions),
     Results = maps:get(results, Execution),
     case maps:is_key(EdgeId, Results) of
         true ->
             ok;
         false ->
             timer:sleep(10),
-            await_execution_result(Node, EdgeId, Attempts - 1)
+            await_execution_result(Node, ExecutionId, EdgeId, Attempts - 1)
     end.
 
 await_replacement_reducer(_Node, _ExecutionId, _OriginalPid, 0) ->
@@ -397,4 +454,23 @@ await_execution_completed(Node, ExecutionId, Attempts) ->
         _ ->
             timer:sleep(10),
             await_execution_completed(Node, ExecutionId, Attempts - 1)
+    end.
+
+
+await_recovery_failed(_Node, _ExecutionId, 0) ->
+    error(reducer_recovery_failure_timeout);
+await_recovery_failed(Node, ExecutionId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    Executions = maps:get(executions, Info),
+    Execution = maps:get(ExecutionId, Executions),
+    case maps:get(status, Execution) of
+        {reducer_recovery_failed, _Reason} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_recovery_failed(
+                Node,
+                ExecutionId,
+                Attempts - 1
+            )
     end.

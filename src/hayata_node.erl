@@ -634,7 +634,25 @@ handle_reducer_down(MonitorRef, Reason, State) ->
         maps:to_list(State#node_state.active_reducers)
     ) of
         {ok, ExecutionId} ->
-            recover_execution_reducer(ExecutionId, Reason, State);
+            case maps:find(ExecutionId, State#node_state.active_reducers) of
+                {ok, #{recovered := true}} ->
+                    mark_reducer_recovery_failed(
+                        ExecutionId,
+                        {repeated_reducer_failure, Reason},
+                        State#node_state{
+                            active_reducers = maps:remove(
+                                ExecutionId,
+                                State#node_state.active_reducers
+                            )
+                        }
+                    );
+
+                {ok, _Reducer} ->
+                    recover_execution_reducer(ExecutionId, Reason, State);
+
+                error ->
+                    State
+            end;
 
         error ->
             State
