@@ -295,7 +295,12 @@ handle_info({'DOWN', MonitorRef, process, EdgePid, Reason}, State) ->
                 active_edges = RemainingEdges,
                 last_edge_event = Event
             },
-            {noreply, NewState};
+            notify_reducer_edge_down(
+                EdgeId,
+                ExecutionId,
+                Reason,
+                NewState
+            );
 
         error ->
             {noreply, handle_reducer_down(MonitorRef, Reason, State)}
@@ -787,4 +792,27 @@ forward_recovered_edge_result(ExecutionId, EdgeId, Result, State) ->
             State;
         _ ->
             State
+    end.
+
+
+-spec notify_reducer_edge_down(
+    term(),
+    term(),
+    term(),
+    #node_state{}
+) -> {noreply, #node_state{}}.
+notify_reducer_edge_down(_EdgeId, undefined, _Reason, State) ->
+    {noreply, State};
+notify_reducer_edge_down(EdgeId, ExecutionId, Reason, State) ->
+    case maps:find(ExecutionId, State#node_state.active_reducers) of
+        {ok, #{pid := ReducerPid}} ->
+            ReducerPid ! {
+                hayata_reducer_edge_down,
+                EdgeId,
+                ExecutionId,
+                Reason
+            },
+            {noreply, State};
+        error ->
+            {noreply, State}
     end.

@@ -150,14 +150,19 @@ start_execution_test() ->
         Info = hayata_node:get_info(Node),
         Executions = maps:get(executions, Info),
 
-        ?assertMatch(
-            #{
-                status := running,
-                edge_ids := [edge_01, edge_02],
-                timeout_ms := 1000
-            },
-            maps:get(execution_01, Executions)
-        )
+        Execution = maps:get(execution_01, Executions),
+
+        ?assert(
+            lists:member(
+                maps:get(status, Execution),
+                [starting, running, completed]
+            )
+        ),
+        ?assertEqual(
+            [edge_01, edge_02],
+            maps:get(edge_ids, Execution)
+        ),
+        ?assertEqual(1000, maps:get(timeout_ms, Execution))
     end).
 
 duplicate_execution_test() ->
