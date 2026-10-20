@@ -229,29 +229,22 @@ handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
 handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs}, _From, State) ->
     case validate_execution(ExecutionId, EdgeTasks, TimeoutMs) of
         ok ->
-            case maps:is_key(ExecutionId, State#node_state.executions) of
+            case maps:is_key(
+                ExecutionId,
+                State#node_state.executions
+            ) of
                 true ->
                     {reply, {error, execution_already_exists}, State};
 
                 false ->
-                    Execution = #{
-                        execution_id => ExecutionId,
-                        status => accepted,
-                        edge_ids => edge_ids(EdgeTasks),
-                        timeout_ms => TimeoutMs,
-                        results => #{},
-                        errors => #{}
-                    },
-                    Executions = maps:put(
+                    start_execution_processes(
                         ExecutionId,
-                        Execution,
-                        State#node_state.executions
-                    ),
-                    NewState = State#node_state{
-                        executions = Executions
-                    },
-                    {reply, {ok, ExecutionId}, NewState}
+                        EdgeTasks,
+                        TimeoutMs,
+                        State
+                    )
             end;
+
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
@@ -362,3 +355,191 @@ validate_edge_tasks(_EdgeTasks, _Seen, _EdgeIds) ->
 -spec edge_ids([{term(), fun(() -> term())}]) -> [term()].
 edge_ids(EdgeTasks) ->
     [EdgeId || {EdgeId, _TaskFun} <- EdgeTasks].
+
+-spec start_execution_processes(
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    #node_state{}
+) -> {reply, {ok, term()} | {error, term()}, #node_state{}}.
+start_execution_processes(ExecutionId, EdgeTasks, TimeoutMs, State) ->
+    EdgeIds = edge_ids(EdgeTasks),
+    Config = #{
+        node_pid => self(),
+        execution_id => ExecutionId,
+        expected_edges => EdgeIds,
+        timeout_ms => TimeoutMs
+    },
+
+    case hayata_reducer:start(Config) of
+        {ok, ReducerPid} ->
+            start_execution_reducer(
+                ExecutionId,
+                EdgeTasks,
+                TimeoutMs,
+                ReducerPid,
+                State
+            );
+
+        {error, Reason} ->
+            {reply, {error, {reducer_start_failed, Reason}}, State}
+    end.
+
+-spec start_execution_reducer(
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    pid(),
+    #node_state{}
+) -> {reply, {ok, term()} | {error, term()}, #node_state{}}.
+start_execution_reducer(
+    ExecutionId,
+    EdgeTasks,
+    TimeoutMs,
+    ReducerPid,
+    State
+) ->
+    MonitorRef = erlang:monitor(process, ReducerPid),
+    Reducer = #{
+        pid => ReducerPid,
+        monitor_ref => MonitorRef
+    },
+    ActiveReducers = maps:put(
+        ExecutionId,
+        Reducer,
+        State#node_state.active_reducers
+    ),
+    Execution = #{
+        execution_id => ExecutionId,
+        status => starting,
+        edge_ids => edge_ids(EdgeTasks),
+        timeout_ms => TimeoutMs,
+        results => #{},
+        errors => #{}
+    },
+    Executions = maps:put(
+        ExecutionId,
+        Execution,
+        State#node_state.executions
+    ),
+    NewState = State#node_state{
+        active_reducers = ActiveReducers,
+        executions = Executions
+    },
+
+    case activate_execution_reducer(ReducerPid) of
+        ok ->
+            start_execution_edges(
+                ExecutionId,
+                EdgeTasks,
+                ReducerPid,
+                NewState
+
+            );
+        {error, Reason} ->
+            erlang:demonitor(MonitorRef, [flush]),
+            {reply, {error, {reducer_activation_failed, Reason}}, State}
+    end.
+
+-spec activate_execution_reducer(pid()) -> ok | {error, term()}.
+activate_execution_reducer(ReducerPid) ->
+    try hayata_reducer:activate(ReducerPid) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, Reason};
+        Other ->
+            {error, {unexpected_activation_result, Other}}
+    catch
+        exit:Reason ->
+            {error, {reducer_activation_exit, Reason}}
+    end.
+
+-spec start_execution_edges(
+    term(),
+    [edge_task()],
+    pid(),
+    #node_state{}
+) -> {reply, {ok, term()}, #node_state{}}.
+start_execution_edges(ExecutionId, EdgeTasks, ReducerPid, State) ->
+    {NewState, _Started, _Failed} = lists:foldl(
+        fun(Task, Acc) ->
+            start_execution_edge(Task, ExecutionId, ReducerPid, Acc)
+        end,
+        {State, [], []},
+        EdgeTasks
+    ),
+    Execution = maps:get(ExecutionId, NewState#node_state.executions),
+    UpdatedExecution = Execution#{status => running},
+    Executions = maps:put(
+        ExecutionId,
+        UpdatedExecution,
+        NewState#node_state.executions
+    ),
+    FinalState = NewState#node_state{executions = Executions},
+    {reply, {ok, ExecutionId}, FinalState}.
+
+-spec start_execution_edge(
+    edge_task(),
+    term(),
+    pid(),
+    {#node_state{}, [term()], [term()]}
+) -> {#node_state{}, [term()], [term()]}.
+start_execution_edge(
+    {EdgeId, TaskFun},
+    ExecutionId,
+    ReducerPid,
+    {State, Started, Failed}
+) ->
+    case hayata_edge:start(
+        self(),
+        ReducerPid,
+        EdgeId,
+        ExecutionId,
+        TaskFun
+    ) of
+        {ok, EdgePid} ->
+            MonitorRef = erlang:monitor(process, EdgePid),
+            Edge = #{
+                edge_id => EdgeId,
+                execution_id => ExecutionId,
+                pid => EdgePid
+            },
+            ActiveEdges = maps:put(
+                MonitorRef,
+                Edge,
+                State#node_state.active_edges
+            ),
+            NewState = State#node_state{
+                active_edges = ActiveEdges
+            },
+            ok = hayata_edge:execute(EdgePid),
+            {NewState, [EdgeId | Started], Failed};
+
+        {error, Reason} ->
+            ReducerPid ! {
+                hayata_reducer_edge_down,
+                EdgeId,
+                ExecutionId,
+                {edge_start_failed, Reason}
+            },
+            {record_execution_error(
+                ExecutionId,
+                EdgeId,
+                {edge_start_failed, Reason},
+                State
+            ), Started, [EdgeId | Failed]}
+    end.
+
+-spec record_execution_error(term(), term(), term(), #node_state{}) ->
+    #node_state{}.
+record_execution_error(ExecutionId, EdgeId, Reason, State) ->
+    Execution = maps:get(ExecutionId, State#node_state.executions),
+    Errors = maps:put(EdgeId, Reason, maps:get(errors, Execution)),
+    UpdatedExecution = Execution#{errors => Errors},
+    Executions = maps:put(
+        ExecutionId,
+        UpdatedExecution,
+        State#node_state.executions
+    ),
+    State#node_state{executions = Executions}.

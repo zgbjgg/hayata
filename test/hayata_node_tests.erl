@@ -152,7 +152,7 @@ start_execution_test() ->
 
         ?assertMatch(
             #{
-                status := accepted,
+                status := running,
                 edge_ids := [edge_01, edge_02],
                 timeout_ms := 1000
             },
