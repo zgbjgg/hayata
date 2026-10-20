@@ -11,7 +11,8 @@
     update_state/2,
     set_edges/2,
     track_edge/3,
-    start_edge/4
+    start_edge/4,
+    start_execution/4
 ]).
 
 -export([
@@ -31,7 +32,9 @@
     edges = [],
     active_edges = #{},
     edge_results = #{},
-    last_edge_event = undefined
+    last_edge_event = undefined,
+    executions = #{},
+    active_reducers = #{}
 }).
 
 -type agent_id() :: term().
@@ -40,6 +43,7 @@
 -type local_state() :: map().
 -type edge_definitions() :: [term()].
 -type edge_id() :: term().
+-type edge_task() :: {edge_id(), fun(() -> term())}.
 
 -export_type([
     agent_id/0,
@@ -117,6 +121,19 @@ start_edge(Node, EdgeId, ExecutionId, TaskFun) ->
     gen_server:call(
         Node,
         {start_edge, EdgeId, ExecutionId, TaskFun}
+    ).
+
+-doc("Starts an asynchronous execution across multiple edges.").
+-spec start_execution(
+    gen_server:server_ref(),
+    term(),
+    [edge_task()],
+    non_neg_integer()
+) -> {ok, term()} | {error, term()}.
+start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs) ->
+    gen_server:call(
+        Node,
+        {start_execution, ExecutionId, EdgeTasks, TimeoutMs}
     ).
 
 %% gen_server callbacks
