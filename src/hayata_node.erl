@@ -273,7 +273,12 @@ handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
         Result,
         State#node_state{edge_results = EdgeResults}
     ),
-    {noreply, NewState};
+    {noreply, forward_recovered_edge_result(
+        ExecutionId,
+        EdgeId,
+        Result,
+        NewState
+    )};
 handle_info({hayata_reducer_result, ExecutionId, FinalResult}, State) ->
     {noreply, complete_execution(ExecutionId, FinalResult, State)};
 handle_info({'DOWN', MonitorRef, process, EdgePid, Reason}, State) ->
@@ -620,6 +625,7 @@ remove_active_reducer(ExecutionId, State) ->
             State
     end.
 
+
 -spec handle_reducer_down(reference(), term(), #node_state{}) ->
     #node_state{}.
 handle_reducer_down(MonitorRef, Reason, State) ->
@@ -628,26 +634,8 @@ handle_reducer_down(MonitorRef, Reason, State) ->
         maps:to_list(State#node_state.active_reducers)
     ) of
         {ok, ExecutionId} ->
-            ActiveReducers = maps:remove(
-                ExecutionId,
-                State#node_state.active_reducers
-            ),
-            Execution = maps:get(
-                ExecutionId,
-                State#node_state.executions
-            ),
-            UpdatedExecution = Execution#{
-                status => {reducer_down, Reason}
-            },
-            Executions = maps:put(
-                ExecutionId,
-                UpdatedExecution,
-                State#node_state.executions
-            ),
-            State#node_state{
-                active_reducers = ActiveReducers,
-                executions = Executions
-            };
+            recover_execution_reducer(ExecutionId, Reason, State);
+
         error ->
             State
     end.
@@ -664,4 +652,118 @@ find_reducer_execution(MonitorRef, [{ExecutionId, Reducer} | Rest]) ->
             {ok, ExecutionId};
         _ ->
             find_reducer_execution(MonitorRef, Rest)
+    end.
+
+
+-spec recover_execution_reducer(term(), term(), #node_state{}) ->
+    #node_state{}.
+recover_execution_reducer(ExecutionId, Reason, State) ->
+    Execution = maps:get(
+        ExecutionId,
+        State#node_state.executions
+    ),
+    ActiveReducers = maps:remove(
+        ExecutionId,
+        State#node_state.active_reducers
+    ),
+    BaseState = State#node_state{
+        active_reducers = ActiveReducers
+    },
+    Config = #{
+        node_pid => self(),
+        execution_id => ExecutionId,
+        expected_edges => maps:get(edge_ids, Execution),
+        timeout_ms => maps:get(timeout_ms, Execution),
+        results => maps:get(results, Execution),
+        errors => maps:get(errors, Execution)
+    },
+    case hayata_reducer:start(Config) of
+        {ok, ReducerPid} ->
+            activate_recovered_reducer(
+                ExecutionId,
+                ReducerPid,
+                BaseState
+            );
+
+        {error, StartReason} ->
+            mark_reducer_recovery_failed(
+                ExecutionId,
+                {start_failed, Reason, StartReason},
+                BaseState
+            )
+    end.
+
+-spec activate_recovered_reducer(term(), pid(), #node_state{}) ->
+    #node_state{}.
+activate_recovered_reducer(ExecutionId, ReducerPid, State) ->
+    MonitorRef = erlang:monitor(process, ReducerPid),
+    case activate_execution_reducer(ReducerPid) of
+        ok ->
+            Reducer = #{
+                pid => ReducerPid,
+                monitor_ref => MonitorRef,
+                recovered => true
+            },
+            ActiveReducers = maps:put(
+                ExecutionId,
+                Reducer,
+                State#node_state.active_reducers
+            ),
+            Execution = maps:get(
+                ExecutionId,
+                State#node_state.executions
+            ),
+            UpdatedExecution = Execution#{status => recovering},
+            Executions = maps:put(
+                ExecutionId,
+                UpdatedExecution,
+                State#node_state.executions
+            ),
+            State#node_state{
+                active_reducers = ActiveReducers,
+                executions = Executions
+            };
+
+        {error, ActivationReason} ->
+            erlang:demonitor(MonitorRef, [flush]),
+            exit(ReducerPid, shutdown),
+            mark_reducer_recovery_failed(
+                ExecutionId,
+                {activation_failed, ActivationReason},
+                State
+            )
+    end.
+
+-spec mark_reducer_recovery_failed(term(), term(), #node_state{}) ->
+    #node_state{}.
+mark_reducer_recovery_failed(ExecutionId, Reason, State) ->
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            UpdatedExecution = Execution#{
+                status => {reducer_recovery_failed, Reason}
+            },
+            save_execution(UpdatedExecution, State);
+        error ->
+            State
+    end.
+
+
+-spec forward_recovered_edge_result(
+    term(),
+    term(),
+    term(),
+    #node_state{}
+) -> #node_state{}.
+forward_recovered_edge_result(ExecutionId, EdgeId, Result, State) ->
+    case maps:find(ExecutionId, State#node_state.active_reducers) of
+        {ok, #{pid := ReducerPid, recovered := true}} ->
+            ReducerPid ! {
+                hayata_reducer_edge_result,
+                EdgeId,
+                ExecutionId,
+                Result
+            },
+            State;
+        _ ->
+            State
     end.
