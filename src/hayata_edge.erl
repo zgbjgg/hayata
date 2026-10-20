@@ -4,6 +4,7 @@
 
 -export([
     start/4,
+    start/5,
     execute/1
 ]).
 
@@ -18,6 +19,7 @@
 
 -record(edge_state, {
     node_pid,
+    reducer_pid = undefined,
     edge_id,
     execution_id,
     task
@@ -28,14 +30,24 @@
 -type task_result() :: {ok, term()} | {error, term()}.
 -type task_fun() :: fun(() -> task_result()).
 
--doc("Starts an anonymous, unlinked edge process.").
+
+ -doc("Starts an anonymous, unlinked edge process.").
 -spec start(pid(), edge_id(), execution_id(), task_fun()) ->
     gen_server:start_ret().
 start(NodePid, EdgeId, ExecutionId, TaskFun)
         when is_pid(NodePid), is_function(TaskFun, 0) ->
+    start(NodePid, undefined, EdgeId, ExecutionId, TaskFun).
+
+-doc("Starts an anonymous edge process with a result reducer.").
+-spec start(pid(), pid() | undefined, edge_id(), execution_id(), task_fun()) ->
+    gen_server:start_ret().
+start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun)
+        when is_pid(NodePid),
+             (is_pid(ReducerPid) orelse ReducerPid =:= undefined),
+             is_function(TaskFun, 0) ->
     gen_server:start(
         ?MODULE,
-        {NodePid, EdgeId, ExecutionId, TaskFun},
+        {NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun},
         []
     ).
 
@@ -44,12 +56,19 @@ start(NodePid, EdgeId, ExecutionId, TaskFun)
 execute(EdgePid) ->
     gen_server:cast(EdgePid, start).
 
+
 -doc(false).
--spec init({pid(), edge_id(), execution_id(), task_fun()}) ->
-    {ok, #edge_state{}, {continue, execute}}.
-init({NodePid, EdgeId, ExecutionId, TaskFun}) ->
+-spec init({
+    pid(),
+    pid() | undefined,
+    edge_id(),
+    execution_id(),
+    task_fun()
+}) -> {ok, #edge_state{}}.
+init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun}) ->
     {ok, #edge_state{
         node_pid = NodePid,
+        reducer_pid = ReducerPid,
         edge_id = EdgeId,
         execution_id = ExecutionId,
         task = TaskFun
@@ -78,6 +97,20 @@ handle_cast(start, State) ->
 
         {error, ErrorReason} ->
             {{error, ErrorReason}, {edge_failed, ErrorReason}}
+    end,
+
+    ok = case State#edge_state.reducer_pid of
+        undefined ->
+            ok;
+
+        ReducerPid ->
+            ReducerPid ! {
+                hayata_reducer_edge_result,
+                State#edge_state.edge_id,
+                State#edge_state.execution_id,
+                Message
+            },
+            ok
     end,
 
     State#edge_state.node_pid ! {
