@@ -260,27 +260,24 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #node_state{}) ->
     {noreply, #node_state{}}.
-
-handle_info(
-    {hayata_edge_result, EdgeId, ExecutionId, Result},
-    State
-) ->
+handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
     ResultKey = {EdgeId, ExecutionId},
     EdgeResults = maps:put(
         ResultKey,
         Result,
         State#node_state.edge_results
     ),
-    NewState = State#node_state{
-        edge_results = EdgeResults
-    },
+    NewState = update_execution_edge_result(
+        ExecutionId,
+        EdgeId,
+        Result,
+        State#node_state{edge_results = EdgeResults}
+    ),
     {noreply, NewState};
-handle_info(
-    {'DOWN', MonitorRef, process, EdgePid, Reason},
-    State
-) ->
-    ActiveEdges = State#node_state.active_edges,
-    case maps:take(MonitorRef, ActiveEdges) of
+handle_info({hayata_reducer_result, ExecutionId, FinalResult}, State) ->
+    {noreply, complete_execution(ExecutionId, FinalResult, State)};
+handle_info({'DOWN', MonitorRef, process, EdgePid, Reason}, State) ->
+    case maps:take(MonitorRef, State#node_state.active_edges) of
         {#{pid := EdgePid, edge_id := EdgeId,
            execution_id := ExecutionId}, RemainingEdges} ->
             Event = #{
@@ -294,8 +291,9 @@ handle_info(
                 last_edge_event = Event
             },
             {noreply, NewState};
+
         error ->
-            {noreply, State}
+            {noreply, handle_reducer_down(MonitorRef, Reason, State)}
     end;
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -543,3 +541,127 @@ record_execution_error(ExecutionId, EdgeId, Reason, State) ->
         State#node_state.executions
     ),
     State#node_state{executions = Executions}.
+
+-spec update_execution_edge_result(
+    term(),
+    term(),
+    term(),
+    #node_state{}
+) -> #node_state{}.
+update_execution_edge_result(ExecutionId, EdgeId, Result, State) ->
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            update_execution_result(Execution, EdgeId, Result, State);
+        error ->
+            State
+    end.
+
+-spec update_execution_result(
+    map(),
+    term(),
+    term(),
+    #node_state{}
+) -> #node_state{}.
+update_execution_result(Execution, EdgeId, {ok, _Value} = Result, State) ->
+    Results = maps:put(EdgeId, Result, maps:get(results, Execution)),
+    Errors = maps:remove(EdgeId, maps:get(errors, Execution)),
+    save_execution(
+        Execution#{results => Results, errors => Errors},
+        State
+    );
+update_execution_result(Execution, EdgeId, {error, Reason}, State) ->
+    Results = maps:remove(EdgeId, maps:get(results, Execution)),
+    Errors = maps:put(EdgeId, Reason, maps:get(errors, Execution)),
+    save_execution(
+        Execution#{results => Results, errors => Errors},
+        State
+    );
+update_execution_result(Execution, EdgeId, Result, State) ->
+    update_execution_result(
+        Execution,
+        EdgeId,
+        {error, {invalid_edge_result, Result}},
+        State
+    ).
+
+-spec save_execution(map(), #node_state{}) -> #node_state{}.
+save_execution(Execution, State) ->
+    ExecutionId = maps:get(execution_id, Execution),
+    Executions = maps:put(
+        ExecutionId,
+        Execution,
+        State#node_state.executions
+    ),
+    State#node_state{executions = Executions}.
+
+-spec complete_execution(term(), map(), #node_state{}) -> #node_state{}.
+complete_execution(ExecutionId, FinalResult, State) ->
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            UpdatedExecution = Execution#{
+                status => maps:get(status, FinalResult),
+                results => maps:get(results, FinalResult),
+                errors => maps:get(errors, FinalResult),
+                pending_edges => maps:get(pending_edges, FinalResult)
+            },
+            NewState = save_execution(UpdatedExecution, State),
+            remove_active_reducer(ExecutionId, NewState);
+        error ->
+            State
+    end.
+
+-spec remove_active_reducer(term(), #node_state{}) -> #node_state{}.
+remove_active_reducer(ExecutionId, State) ->
+    case maps:take(ExecutionId, State#node_state.active_reducers) of
+        {#{monitor_ref := MonitorRef}, ActiveReducers} ->
+            erlang:demonitor(MonitorRef, [flush]),
+            State#node_state{active_reducers = ActiveReducers};
+        error ->
+            State
+    end.
+
+-spec handle_reducer_down(reference(), term(), #node_state{}) ->
+    #node_state{}.
+handle_reducer_down(MonitorRef, Reason, State) ->
+    case find_reducer_execution(
+        MonitorRef,
+        maps:to_list(State#node_state.active_reducers)
+    ) of
+        {ok, ExecutionId} ->
+            ActiveReducers = maps:remove(
+                ExecutionId,
+                State#node_state.active_reducers
+            ),
+            Execution = maps:get(
+                ExecutionId,
+                State#node_state.executions
+            ),
+            UpdatedExecution = Execution#{
+                status => {reducer_down, Reason}
+            },
+            Executions = maps:put(
+                ExecutionId,
+                UpdatedExecution,
+                State#node_state.executions
+            ),
+            State#node_state{
+                active_reducers = ActiveReducers,
+                executions = Executions
+            };
+        error ->
+            State
+    end.
+
+-spec find_reducer_execution(
+    reference(),
+    [{term(), map()}]
+) -> {ok, term()} | error.
+find_reducer_execution(_MonitorRef, []) ->
+    error;
+find_reducer_execution(MonitorRef, [{ExecutionId, Reducer} | Rest]) ->
+    case maps:get(monitor_ref, Reducer) of
+        MonitorRef ->
+            {ok, ExecutionId};
+        _ ->
+            find_reducer_execution(MonitorRef, Rest)
+    end.
