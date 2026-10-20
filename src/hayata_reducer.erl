@@ -55,7 +55,7 @@ init(Config) ->
                 results = Results,
                 errors = Errors,
                 timeout_ms = TimeoutMs,
-                timeout_ref = TimeoutRef,
+                timeout_ref = undefined,
                 activated = false
             }};
         {error, Reason} ->
