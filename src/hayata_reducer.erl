@@ -2,7 +2,10 @@
 
 -behaviour(gen_server).
 
--export([start/1]).
+-export([
+    start/1,
+    activate/1
+]).
 
 -export([
     init/1,
@@ -40,6 +43,11 @@
 start(Config) when is_map(Config) ->
     gen_server:start(?MODULE, Config, []).
 
+-doc("Activates the reducer and confirms that it is ready.").
+-spec activate(gen_server:server_ref()) -> ok.
+activate(Reducer) ->
+    gen_server:call(Reducer, activate).
+
 -doc(false).
 -spec init(config()) ->
     {ok, #reducer_state{}, {continue, evaluate}} |
@@ -65,6 +73,20 @@ init(Config) ->
 -doc(false).
 -spec handle_call(term(), gen_server:from(), #reducer_state{}) ->
     {reply, {error, unsupported_request}, #reducer_state{}}.
+handle_call(activate, _From, State = #reducer_state{execution_id = ExecutionId, activated = false, timeout_ms = TimeoutMs}) ->
+    TimeoutRef = erlang:send_after(
+        TimeoutMs,
+        self(),
+        {reducer_timeout, ExecutionId}
+    ),
+    NewState = State#reducer_state{
+        activated = true,
+        timeout_ref = TimeoutRef
+    },
+    self() ! {hayata_reducer_evaluate, ExecutionId},
+    {reply, ok, NewState};
+handle_call(activate, _From, State) ->
+    {reply, {error, already_activated}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -86,6 +108,8 @@ handle_info({hayata_reducer_edge_down, EdgeId, ExecutionId, Reason}, State = #re
     evaluate_completion(NewState);
 handle_info({reducer_timeout, ExecutionId}, State = #reducer_state{execution_id = ExecutionId}) ->
     finish(timed_out, State);
+handle_info({hayata_reducer_evaluate, ExecutionId}, State = #reducer_state{execution_id = ExecutionId, activated = true}) ->
+    evaluate_completion(State);
 handle_info({hayata_reducer_activate, ExecutionId}, State = #reducer_state{execution_id = ExecutionId, activated = false, timeout_ms = TimeoutMs}) ->
     TimeoutRef = erlang:send_after(
         TimeoutMs,
