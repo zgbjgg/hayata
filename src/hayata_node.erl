@@ -167,7 +167,9 @@ handle_call(get_info, _From, State) ->
         edges => State#node_state.edges,
         active_edges => State#node_state.active_edges,
         edge_results => State#node_state.edge_results,
-        last_edge_event => State#node_state.last_edge_event
+        last_edge_event => State#node_state.last_edge_event,
+        executions => State#node_state.executions,
+        active_reducers => State#node_state.active_reducers
     },
     {reply, Info, State};
 handle_call(get_state, _From, State) ->
@@ -221,6 +223,35 @@ handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
             },
             ok = hayata_edge:execute(EdgePid),
             {reply, {ok, EdgePid}, NewState};
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end;
+handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs}, _From, State) ->
+    case validate_execution(ExecutionId, EdgeTasks, TimeoutMs) of
+        ok ->
+            case maps:is_key(ExecutionId, State#node_state.executions) of
+                true ->
+                    {reply, {error, execution_already_exists}, State};
+
+                false ->
+                    Execution = #{
+                        execution_id => ExecutionId,
+                        status => accepted,
+                        edge_ids => edge_ids(EdgeTasks),
+                        timeout_ms => TimeoutMs,
+                        results => #{},
+                        errors => #{}
+                    },
+                    Executions = maps:put(
+                        ExecutionId,
+                        Execution,
+                        State#node_state.executions
+                    ),
+                    NewState = State#node_state{
+                        executions = Executions
+                    },
+                    {reply, {ok, ExecutionId}, NewState}
+            end;
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
@@ -292,3 +323,42 @@ code_change(_OldVersion, State, _Extra) ->
 -spec registered_name(agent_id(), node_name()) -> tuple().
 registered_name(AgentId, Name) ->
     {hayata_node, AgentId, Name}.
+
+-spec validate_execution(term(), term(), term()) ->
+    ok | {error, term()}.
+validate_execution(_ExecutionId, EdgeTasks, _TimeoutMs)
+        when not is_list(EdgeTasks) ->
+    {error, invalid_edge_tasks};
+validate_execution(_ExecutionId, _EdgeTasks, TimeoutMs)
+        when not is_integer(TimeoutMs); TimeoutMs < 0 ->
+    {error, invalid_timeout};
+validate_execution(_ExecutionId, EdgeTasks, _TimeoutMs) ->
+    case validate_edge_tasks(EdgeTasks, [], []) of
+        {ok, _EdgeIds} ->
+            ok;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec validate_edge_tasks([term()], [term()], [term()]) ->
+    {ok, [term()]} | {error, term()}.
+validate_edge_tasks([], _Seen, EdgeIds) ->
+    {ok, lists:reverse(EdgeIds)};
+validate_edge_tasks([{EdgeId, TaskFun} | Rest], Seen, EdgeIds)
+        when is_function(TaskFun, 0) ->
+    case lists:member(EdgeId, Seen) of
+        true ->
+            {error, duplicate_edge_id};
+        false ->
+            validate_edge_tasks(
+                Rest,
+                [EdgeId | Seen],
+                [EdgeId | EdgeIds]
+            )
+    end;
+validate_edge_tasks(_EdgeTasks, _Seen, _EdgeIds) ->
+    {error, invalid_edge_task}.
+
+-spec edge_ids([{term(), fun(() -> term())}]) -> [term()].
+edge_ids(EdgeTasks) ->
+    [EdgeId || {EdgeId, _TaskFun} <- EdgeTasks].

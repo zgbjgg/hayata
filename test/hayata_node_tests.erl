@@ -130,6 +130,86 @@ start_edge_test() ->
         await_edge_termination(Node, edge_01, execution_01, 100)
     end).
 
+start_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        EdgeTasks = [
+            {edge_01, fun() -> {ok, result_01} end},
+            {edge_02, fun() -> {ok, result_02} end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_01},
+            hayata_node:start_execution(
+                Node,
+                execution_01,
+                EdgeTasks,
+                1000
+            )
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+
+        ?assertMatch(
+            #{
+                status := accepted,
+                edge_ids := [edge_01, edge_02],
+                timeout_ms := 1000
+            },
+            maps:get(execution_01, Executions)
+        )
+    end).
+
+duplicate_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ?assertEqual(
+            {ok, execution_01},
+            hayata_node:start_execution(Node, execution_01, [], 1000)
+        ),
+        ?assertEqual(
+            {error, execution_already_exists},
+            hayata_node:start_execution(Node, execution_01, [], 1000)
+        )
+    end).
+
+invalid_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ?assertEqual(
+            {error, invalid_timeout},
+            hayata_node:start_execution(Node, execution_01, [], -1)
+        ),
+        ?assertEqual(
+            {error, invalid_edge_tasks},
+            hayata_node:start_execution(Node, execution_02, not_a_list, 1000)
+        ),
+        ?assertEqual(
+            {error, invalid_edge_task},
+            hayata_node:start_execution(
+                Node,
+                execution_03,
+                [{edge_01, not_a_function}],
+                1000
+            )
+        ),
+        ?assertEqual(
+            {error, duplicate_edge_id},
+            hayata_node:start_execution(
+                Node,
+                execution_04,
+                [
+                    {edge_01, fun() -> {ok, first} end},
+                    {edge_01, fun() -> {ok, second} end}
+                ],
+                1000
+            )
+        ),
+
+        ?assertEqual(
+            #{},
+            maps:get(executions, hayata_node:get_info(Node))
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
