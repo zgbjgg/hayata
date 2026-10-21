@@ -1193,6 +1193,63 @@ recovers_after_node_supervisor_restart_test() ->
         exit(SupPid, shutdown)
     end.
 
+execution_timeout_cannot_interrupt_blocked_policy_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(_Context) ->
+            Parent ! policy_started,
+            receive
+                continue_policy ->
+                    {finish, #{answer => 42}}
+            end
+        end,
+        max_steps => 3,
+        execution_timeout => 100
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Caller = spawn(fun() ->
+            Result = hayata_agent:run(Agent, hello),
+            Parent ! {run_result, Result}
+        end),
+
+        receive
+            policy_started ->
+                ok
+        after 1000 ->
+            error(policy_start_timeout)
+        end,
+
+        receive
+            {run_result, _UnexpectedResult} ->
+                error(run_returned_before_policy_finished)
+        after 250 ->
+            ok
+        end,
+
+        Agent ! continue_policy,
+
+        receive
+            {run_result, {ok, _InvocationId}} ->
+                ok;
+            {run_result, OtherResult} ->
+                error({unexpected_run_result, OtherResult})
+        after 1000 ->
+            error(run_response_timeout)
+        end,
+
+        await_terminal_status(Agent, 100),
+
+        ?assertEqual(
+            completed,
+            maps:get(status, hayata_agent:get_info(Agent))
+        )
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
