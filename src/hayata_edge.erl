@@ -67,7 +67,7 @@ execute(EdgePid) ->
 }) -> {ok, #edge_state{}}.
 init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun}) ->
     EdgePid = self(),
-    spawn(fun() -> watch_processes(NodePid, EdgePid) end),
+    ok = hayata_monitor:start(NodePid, EdgePid),
 
     {ok, #edge_state{
         node_pid = NodePid,
@@ -145,18 +145,3 @@ code_change(_OldVersion, State, _Extra) ->
     {ok, State}.
 
 %% Internal functions
-
--spec watch_processes(pid(), pid()) -> ok.
-watch_processes(NodePid, EdgePid) ->
-    NodeMonitor = erlang:monitor(process, NodePid),
-    EdgeMonitor = erlang:monitor(process, EdgePid),
-
-    receive
-        {'DOWN', NodeMonitor, process, NodePid, _Reason} ->
-            exit(EdgePid, kill),
-            ok;
-
-        {'DOWN', EdgeMonitor, process, EdgePid, _Reason} ->
-            erlang:demonitor(NodeMonitor, [flush]),
-            ok
-    end.
