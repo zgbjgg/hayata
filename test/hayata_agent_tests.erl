@@ -518,6 +518,61 @@ ignores_stale_invocation_timeout_test() ->
             hayata_agent:get_result(Agent)
         )
     end).
+
+restarts_node_after_completed_invocation_test() ->
+    AgentId = make_ref(),
+    NodeKey = {?MODULE, AgentId},
+    persistent_term:put(NodeKey, 0),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                Attempt = persistent_term:get(NodeKey),
+                persistent_term:put(NodeKey, Attempt + 1),
+                #{attempt => Attempt + 1}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            FirstNodePid = hayata_node:whereis(AgentId, work),
+            ?assert(is_pid(FirstNodePid)),
+
+            {ok, _FirstInvocation} =
+                hayata_agent:run(Agent, first_attempt),
+
+            await_status(Agent, completed, 300),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            SecondNodePid = hayata_node:whereis(AgentId, work),
+
+            await_status(Agent, completed, 300),
+
+            ?assert(is_pid(SecondNodePid)),
+            ?assertNotEqual(FirstNodePid, SecondNodePid),
+            ?assertNot(is_process_alive(FirstNodePid)),
+
+            ?assertEqual(
+                {ok, #{attempt => 2}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(NodeKey)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
