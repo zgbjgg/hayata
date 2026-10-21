@@ -445,6 +445,79 @@ ignores_stale_execution_notification_test() ->
         persistent_term:erase(NodeKey)
     end.
 
+ignores_stale_invocation_timeout_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                Parent ! {execution_started, self()},
+                receive
+                    continue ->
+                        #{result => fresh}
+                end
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3,
+        execution_timeout => 5000
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, FirstInvocationId} =
+            hayata_agent:run(Agent, first_attempt),
+
+        ?assertEqual(
+            {error, already_running},
+            hayata_agent:run(Agent, overlapping_attempt)
+        ),
+
+        %% Let the first invocation finish before starting another.
+        ExecutionPid = receive
+            {execution_started, Pid} ->
+                Pid
+        after 2000 ->
+            error(execution_start_timeout)
+        end,
+
+        ExecutionPid ! continue,
+        await_status(Agent, completed, 300),
+
+        {ok, SecondInvocationId} =
+            hayata_agent:run(Agent, second_attempt),
+
+        ?assertNotEqual(FirstInvocationId, SecondInvocationId),
+
+        SecondExecutionPid = receive
+            {execution_started, Pid2} ->
+                Pid2
+        after 2000 ->
+            error(second_execution_start_timeout)
+        end,
+
+        Agent ! {invocation_timeout, FirstInvocationId},
+        timer:sleep(50),
+
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(running, maps:get(status, Info)),
+        ?assertEqual(SecondInvocationId, maps:get(invocation_id, Info)),
+
+        SecondExecutionPid ! continue,
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{result => fresh}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
