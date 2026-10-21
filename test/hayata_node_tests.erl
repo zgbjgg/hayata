@@ -1442,6 +1442,110 @@ reducer_recovery_preserves_concurrent_edge_results_test() ->
         ?assertEqual(1, atomics:get(Runs, 2))
     end).
 
+
+reducer_recovery_processes_queued_results_before_timeout_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_queued_results_before_timeout,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, edge_01, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end},
+            {edge_02, fun() ->
+                Parent ! {edge_started, edge_02, self()},
+                receive
+                    continue -> {ok, result_02}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePids = receive_edge_pids(2, #{}),
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        try
+            ok = sys:suspend(ReplacementReducer),
+
+            ReplacementReducer ! {
+                hayata_reducer_edge_result,
+                edge_01,
+                ExecutionId,
+                {ok, result_01}
+            },
+            ReplacementReducer ! {
+                hayata_reducer_edge_result,
+                edge_02,
+                ExecutionId,
+                {ok, result_02}
+            },
+            ReplacementReducer ! {
+                reducer_timeout,
+                ExecutionId
+            }
+        after
+            case sys:resume(ReplacementReducer) of
+                ok -> ok;
+                _ -> ok
+            end
+        end,
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{
+                edge_01 => {ok, result_01},
+                edge_02 => {ok, result_02}
+            },
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution)),
+        ?assertEqual(
+            false,
+            maps:is_key(
+                ExecutionId,
+                maps:get(active_reducers, FinalInfo)
+            )
+        ),
+
+        maps:foreach(
+            fun(_EdgeId, EdgePid) ->
+                EdgePid ! continue
+            end,
+            EdgePids
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
