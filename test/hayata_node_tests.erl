@@ -1702,6 +1702,183 @@ edge_failure_result_and_down_are_deduplicated_test() ->
         ?assertEqual([], maps:get(pending_edges, Execution))
     end).
 
+start_execution_notifies_recipient_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = execution_notification,
+        RecipientPid = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() -> {ok, result_01} end}
+        ],
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                1000,
+                RecipientPid
+            )
+        ),
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        receive
+            {
+                hayata_node_execution,
+                think_01,
+                ExecutionId,
+                FinalResult
+            } ->
+                ?assertEqual(completed, maps:get(status, FinalResult)),
+                ?assertEqual(
+                    #{edge_01 => {ok, result_01}},
+                    maps:get(results, FinalResult)
+                ),
+                ?assertEqual(#{}, maps:get(errors, FinalResult)),
+                ?assertEqual([], maps:get(pending_edges, FinalResult))
+        after 1000 ->
+            error(execution_notification_timeout)
+        end
+    end).
+
+start_execution_notification_is_not_duplicated_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = execution_notification_deduplication,
+        RecipientPid = self(),
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            [{edge_01, fun() -> {ok, result_01} end}],
+            1000,
+            RecipientPid
+        ),
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        receive
+            {
+                hayata_node_execution,
+                think_01,
+                ExecutionId,
+                #{status := completed}
+            } ->
+                ok
+        after 1000 ->
+            error(execution_notification_timeout)
+        end,
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        ?assertEqual(false, maps:is_key(ExecutionId, ActiveReducers)),
+
+        %% A late duplicate result must not notify the recipient again.
+        Node ! {
+            hayata_edge_result,
+            edge_01,
+            ExecutionId,
+            {ok, duplicate_result}
+        },
+
+        _ = hayata_node:get_info(Node),
+
+        receive
+            {hayata_node_execution, think_01, ExecutionId, _} ->
+                error(duplicate_execution_notification)
+        after 50 ->
+            ok
+        end
+    end).
+
+repeated_reducer_failure_notifies_recipient_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_recovery_failure_notification,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                5000,
+                Parent
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducers
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        exit(ReplacementReducer, kill),
+
+        await_recovery_failed(Node, ExecutionId, 100),
+
+        receive
+            {
+                hayata_node_execution,
+                think_01,
+                ExecutionId,
+                FinalResult
+            } ->
+                ?assertMatch(
+                    {reducer_recovery_failed, _},
+                    maps:get(status, FinalResult)
+                )
+        after 1000 ->
+            error(execution_notification_timeout)
+        end,
+
+        %% A terminal execution must not notify a second time.
+        InfoAfterFailure = hayata_node:get_info(Node),
+        Execution = maps:get(
+            ExecutionId,
+            maps:get(executions, InfoAfterFailure)
+        ),
+        ?assertMatch(
+            {reducer_recovery_failed, _},
+            maps:get(status, Execution)
+        ),
+
+        EdgePid ! continue,
+
+        receive
+            {hayata_node_execution, think_01, ExecutionId, _} ->
+                error(duplicate_execution_notification)
+        after 50 ->
+            ok
+        end
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -1815,7 +1992,6 @@ await_execution_completed(Node, ExecutionId, Attempts) ->
             await_execution_completed(Node, ExecutionId, Attempts - 1)
     end.
 
-
 await_recovery_failed(_Node, _ExecutionId, 0) ->
     error(reducer_recovery_failure_timeout);
 await_recovery_failed(Node, ExecutionId, Attempts) ->
@@ -1833,7 +2009,6 @@ await_recovery_failed(Node, ExecutionId, Attempts) ->
                 Attempts - 1
             )
     end.
-
 
 await_execution_status(_Node, _ExecutionId, _Status, 0) ->
     error(execution_status_timeout);
@@ -1854,7 +2029,6 @@ await_execution_status(Node, ExecutionId, Status, Attempts) ->
             )
     end.
 
-
 await_execution_error(_Node, _ExecutionId, _EdgeId, 0) ->
     error(execution_error_timeout);
 await_execution_error(Node, ExecutionId, EdgeId, Attempts) ->
@@ -1874,7 +2048,6 @@ await_execution_error(Node, ExecutionId, EdgeId, Attempts) ->
                 Attempts - 1
             )
     end.
-
 
 await_edge_failure_termination(_Node, _EdgeId, _ExecutionId, 0) ->
     error(edge_failure_termination_timeout);
@@ -1899,7 +2072,6 @@ await_edge_failure_termination(Node, EdgeId, ExecutionId, Attempts) ->
                 Attempts - 1
             )
     end.
-
 
 receive_edge_pids(0, EdgePids) ->
     EdgePids;

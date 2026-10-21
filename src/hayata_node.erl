@@ -12,7 +12,8 @@
     set_edges/2,
     track_edge/3,
     start_edge/4,
-    start_execution/4
+    start_execution/4,
+    start_execution/5
 ]).
 
 -export([
@@ -136,6 +137,21 @@ start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs) ->
         {start_execution, ExecutionId, EdgeTasks, TimeoutMs}
     ).
 
+-doc("Starts an asynchronous execution and notifies a recipient when it terminates.").
+-spec start_execution(
+    gen_server:server_ref(),
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    pid()
+) -> {ok, term()} | {error, term()}.
+start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid)
+        when is_pid(RecipientPid) ->
+    gen_server:call(
+        Node,
+        {start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}
+    ).
+
 %% gen_server callbacks
 
 -doc(false).
@@ -227,27 +243,21 @@ handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
             {reply, {error, Reason}, State}
     end;
 handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs}, _From, State) ->
-    case validate_execution(ExecutionId, EdgeTasks, TimeoutMs) of
-        ok ->
-            case maps:is_key(
-                ExecutionId,
-                State#node_state.executions
-            ) of
-                true ->
-                    {reply, {error, execution_already_exists}, State};
-
-                false ->
-                    start_execution_processes(
-                        ExecutionId,
-                        EdgeTasks,
-                        TimeoutMs,
-                        State
-                    )
-            end;
-
-        {error, Reason} ->
-            {reply, {error, Reason}, State}
-    end;
+    start_execution_request(
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        undefined,
+        State
+    );
+handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}, _From, State) when is_pid(RecipientPid) ->
+    start_execution_request(
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        RecipientPid,
+        State
+    );
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -682,6 +692,11 @@ complete_execution_result(ExecutionId, Execution, FinalResult, State) ->
         pending_edges => maps:get(pending_edges, FinalResult, [])
     },
     NewState = save_execution(UpdatedExecution, State),
+    notify_execution_recipient(
+        ExecutionId,
+        UpdatedExecution,
+        NewState
+    ),
     remove_active_reducer(ExecutionId, NewState).
 
 -spec remove_active_reducer(term(), #node_state{}) -> #node_state{}.
@@ -856,7 +871,13 @@ mark_reducer_recovery_failed(ExecutionId, Reason, State) ->
                     UpdatedExecution = Execution#{
                         status => {reducer_recovery_failed, Reason}
                     },
-                    save_execution(UpdatedExecution, State)
+                    NewState = save_execution(UpdatedExecution, State),
+                    notify_execution_recipient(
+                        ExecutionId,
+                        UpdatedExecution,
+                        NewState
+                    ),
+                    NewState
             end;
         error ->
             State
@@ -988,3 +1009,96 @@ handle_active_edge_result(EdgeId, ExecutionId, Result, State) ->
         Result,
         NewState
     )}.
+
+-spec start_execution_request(
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    pid() | undefined,
+    #node_state{}
+) -> {reply, term(), #node_state{}}.
+start_execution_request(
+    ExecutionId,
+    EdgeTasks,
+    TimeoutMs,
+    RecipientPid,
+    State
+) ->
+    case validate_execution(ExecutionId, EdgeTasks, TimeoutMs) of
+        ok ->
+            case maps:is_key(
+                ExecutionId,
+                State#node_state.executions
+            ) of
+                true ->
+                    {reply, {error, execution_already_exists}, State};
+                false ->
+                    start_execution_with_recipient(
+                        ExecutionId,
+                        EdgeTasks,
+                        TimeoutMs,
+                        RecipientPid,
+                        State
+                    )
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
+
+-spec start_execution_with_recipient(
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    pid() | undefined,
+    #node_state{}
+) -> {reply, term(), #node_state{}}.
+start_execution_with_recipient(
+    ExecutionId,
+    EdgeTasks,
+    TimeoutMs,
+    RecipientPid,
+    State
+) ->
+    case start_execution_processes(
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        State
+    ) of
+        {reply, {ok, ExecutionId}, NewState} ->
+            Execution = maps:get(
+                ExecutionId,
+                NewState#node_state.executions
+            ),
+            UpdatedExecution = Execution#{
+                notify_to => RecipientPid
+            },
+            Executions = maps:put(
+                ExecutionId,
+                UpdatedExecution,
+                NewState#node_state.executions
+            ),
+            {reply, {ok, ExecutionId},
+             NewState#node_state{executions = Executions}};
+        {reply, Error, NewState} ->
+            {reply, Error, NewState}
+    end.
+
+-spec notify_execution_recipient(
+    term(),
+    map(),
+    #node_state{}
+) -> ok.
+notify_execution_recipient(ExecutionId, Execution, State) ->
+    case maps:get(notify_to, Execution, undefined) of
+        RecipientPid when is_pid(RecipientPid) ->
+            RecipientPid ! {
+                hayata_node_execution,
+                State#node_state.node_id,
+                ExecutionId,
+                Execution
+            },
+            ok;
+        undefined ->
+            ok
+    end.
