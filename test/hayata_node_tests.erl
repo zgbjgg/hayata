@@ -1077,6 +1077,112 @@ reducer_recovery_with_edge_failure_test() ->
         ?assertEqual(1, atomics:get(Runs, 1))
     end).
 
+reducer_recovery_ignores_stale_result_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_stale_reducer_result,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, actual_result}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        StaleResult = #{
+            status => completed,
+            execution_id => ExecutionId,
+            results => #{edge_01 => {ok, stale_result}},
+            errors => #{},
+            pending_edges => []
+        },
+
+        Node ! {
+            hayata_reducer_result,
+            OriginalReducer,
+            ExecutionId,
+            StaleResult
+        },
+
+        InfoAfterStaleResult = hayata_node:get_info(Node),
+        ExecutionsAfterStaleResult = maps:get(
+            executions,
+            InfoAfterStaleResult
+        ),
+        ExecutionAfterStaleResult = maps:get(
+            ExecutionId,
+            ExecutionsAfterStaleResult
+        ),
+        ActiveReducersAfterStaleResult = maps:get(
+            active_reducers,
+            InfoAfterStaleResult
+        ),
+        #{pid := ActiveReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersAfterStaleResult
+        ),
+
+        ?assertEqual(
+            recovering,
+            maps:get(status, ExecutionAfterStaleResult)
+        ),
+        ?assertEqual(
+            #{},
+            maps:get(results, ExecutionAfterStaleResult)
+        ),
+        ?assertEqual(
+            ReplacementReducer,
+            ActiveReducer
+        ),
+
+        EdgePid ! continue,
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, actual_result}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
