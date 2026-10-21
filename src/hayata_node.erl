@@ -261,30 +261,27 @@ handle_cast(_Request, State) ->
 -spec handle_info(term(), #node_state{}) ->
     {noreply, #node_state{}}.
 handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
-    ResultKey = {EdgeId, ExecutionId},
-    EdgeResults = case maps:is_key(ResultKey, State#node_state.edge_results) of
-        true ->
-            State#node_state.edge_results;
-
-        false ->
-            maps:put(
-                ResultKey,
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    {noreply, State};
+                false ->
+                    handle_active_edge_result(
+                        EdgeId,
+                        ExecutionId,
+                        Result,
+                        State
+                    )
+            end;
+        error ->
+            handle_active_edge_result(
+                EdgeId,
+                ExecutionId,
                 Result,
-                State#node_state.edge_results
+                State
             )
-    end,
-    NewState = update_execution_edge_result(
-        ExecutionId,
-        EdgeId,
-        Result,
-        State#node_state{edge_results = EdgeResults}
-    ),
-    {noreply, forward_recovered_edge_result(
-        ExecutionId,
-        EdgeId,
-        Result,
-        NewState
-    )};
+    end;
 handle_info({hayata_reducer_result, ReducerPid, ExecutionId, FinalResult}, State) ->
     case maps:find(ExecutionId, State#node_state.active_reducers) of
         {ok, #{pid := ReducerPid}} ->
@@ -957,3 +954,37 @@ is_terminal_status({reducer_recovery_failed, _Reason}) ->
     true;
 is_terminal_status(_Status) ->
     false.
+
+-spec handle_active_edge_result(
+    term(),
+    term(),
+    term(),
+    #node_state{}
+) -> {noreply, #node_state{}}.
+handle_active_edge_result(EdgeId, ExecutionId, Result, State) ->
+    ResultKey = {EdgeId, ExecutionId},
+    EdgeResults = case maps:is_key(
+        ResultKey,
+        State#node_state.edge_results
+    ) of
+        true ->
+            State#node_state.edge_results;
+        false ->
+            maps:put(
+                ResultKey,
+                Result,
+                State#node_state.edge_results
+            )
+    end,
+    NewState = update_execution_edge_result(
+        ExecutionId,
+        EdgeId,
+        Result,
+        State#node_state{edge_results = EdgeResults}
+    ),
+    {noreply, forward_recovered_edge_result(
+        ExecutionId,
+        EdgeId,
+        Result,
+        NewState
+    )}.

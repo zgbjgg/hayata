@@ -855,6 +855,16 @@ terminal_execution_preserves_timeout_test() ->
         ?assertEqual(
             maps:get(results, ExecutionBefore),
             maps:get(results, ExecutionAfter)
+        ),
+
+        EdgeResultKey = {edge_01, ExecutionId},
+
+        EdgeResultsBefore = maps:get(edge_results, InfoBefore),
+        EdgeResultsAfter = maps:get(edge_results, InfoAfter),
+
+        ?assertEqual(
+            maps:find(EdgeResultKey, EdgeResultsBefore),
+            maps:find(EdgeResultKey, EdgeResultsAfter)
         )
     end).
 
