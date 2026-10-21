@@ -66,6 +66,102 @@ rejects_invalid_node_test() ->
         )
     end).
 
+recovers_after_node_failure_test() ->
+    AgentId = make_ref(),
+    FailureKey = {?MODULE, AgentId},
+    persistent_term:put(FailureKey, true),
+
+    Config = #{
+        id => AgentId,
+        state => #{attempt => 0},
+        nodes => #{
+            work => fun(State) ->
+                case persistent_term:get(FailureKey) of
+                    true ->
+                        persistent_term:put(FailureKey, false),
+                        erlang:error(first_attempt_failed);
+                    false ->
+                        #{attempt => maps:get(attempt, State) + 1}
+                end
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            {ok, _FirstInvocation} =
+                hayata_agent:run(Agent, first_attempt),
+
+            await_terminal_status(Agent, 100),
+
+            ?assertMatch(
+                {error, _Reason},
+                hayata_agent:get_result(Agent)
+            ),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            await_status(Agent, completed, 100),
+
+            ?assertEqual(
+                #{attempt => 1},
+                hayata_agent:get_state(Agent)
+            ),
+            ?assertEqual(
+                {ok, #{attempt => 1}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(FailureKey)
+    end.
+
+policy_exception_sets_terminal_error_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(_Context) ->
+            erlang:error(policy_failed)
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        ?assertMatch(
+            {error, {policy_exception, error, policy_failed, _Stacktrace}},
+            hayata_agent:run(Agent, hello)
+        ),
+
+        Info = hayata_agent:get_info(Agent),
+        ?assertMatch(
+            {error, {policy_exception, error, policy_failed, _}},
+            maps:get(status, Info)
+        )
+    end).
+
+await_terminal_status(_Agent, 0) ->
+    error(agent_terminal_status_timeout);
+await_terminal_status(Agent, Attempts) ->
+    Status = maps:get(status, hayata_agent:get_info(Agent)),
+    case Status of
+        completed ->
+            ok;
+        {error, _Reason} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_terminal_status(Agent, Attempts - 1)
+    end.
+
 with_agent(Config, TestFun) ->
     {ok, SupPid} = hayata_agent_sup:start_link(Config),
     unlink(SupPid),
