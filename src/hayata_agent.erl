@@ -299,11 +299,18 @@ prepare_invocation(_State) ->
 
 -spec reset_nodes(#agent_state{}) -> ok | {error, term()}.
 reset_nodes(State) ->
-    reset_nodes(
-        State#agent_state.node_sup_pid,
-        State#agent_state.id,
-        maps:keys(State#agent_state.nodes)
-    ).
+    case hayata_agent_sup:node_supervisor(
+        State#agent_state.supervisor_pid
+    ) of
+        {ok, NodeSupPid} ->
+            reset_nodes(
+                NodeSupPid,
+                State#agent_state.id,
+                maps:keys(State#agent_state.nodes)
+            );
+        {error, Reason} ->
+            {error, {node_supervisor_unavailable, Reason}}
+    end.
 
 -spec reset_nodes(pid(), term(), [atom()]) -> ok | {error, term()}.
 reset_nodes(_NodeSupPid, _AgentId, []) ->

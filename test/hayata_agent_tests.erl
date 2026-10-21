@@ -1137,6 +1137,62 @@ run_with_subscription_reuses_subscriber_test() ->
         )
     end).
 
+recovers_after_node_supervisor_restart_test() ->
+    AgentId = make_ref(),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                #{result => recovered}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    {ok, SupPid} = hayata_agent_sup:start_link(Config),
+    unlink(SupPid),
+
+    try
+        {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
+        {ok, OldNodeSupPid} =
+            hayata_agent_sup:node_supervisor(SupPid),
+
+        {ok, _FirstInvocation} =
+            hayata_agent:run(AgentPid, first_attempt),
+
+        await_status(AgentPid, completed, 300),
+
+        ok = supervisor:terminate_child(
+            SupPid,
+            hayata_node_sup
+        ),
+
+        {ok, NewNodeSupPid} =
+            supervisor:restart_child(SupPid, hayata_node_sup),
+
+        ?assertNotEqual(OldNodeSupPid, NewNodeSupPid),
+
+        {ok, _SecondInvocation} =
+            hayata_agent:run(AgentPid, second_attempt),
+
+        await_status(AgentPid, completed, 300),
+
+        ?assertEqual(
+            {ok, #{result => recovered}},
+            hayata_agent:get_result(AgentPid)
+        )
+    after
+        exit(SupPid, shutdown)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
