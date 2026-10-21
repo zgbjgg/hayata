@@ -1,7 +1,9 @@
 {application, hayata, [
-    {description, "An OTP application"},
+    {description, "An Erlang/OTP framework for building AI agents."},
     {vsn, "0.1.0"},
-    {registered, []},
+    {registered, [
+        hayata_sup
+    ]},
     {mod, {hayata_app, []}},
     {applications, [
         kernel,
@@ -10,5 +12,7 @@
     {env, []},
     {modules, []},
     {licenses, ["Apache-2.0"]},
-    {links, []}
- ]}.
+    {links, [
+        {"GitHub", "https://github.com/zgbjgg/hayata"}
+    ]}
+]}.
