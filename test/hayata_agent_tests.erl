@@ -1057,6 +1057,40 @@ run_with_subscription_notifies_timeout_test() ->
         end
     end).
 
+
+run_with_subscription_notifies_initial_policy_exception_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(_Context) ->
+            erlang:error(policy_failed)
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Result = hayata_agent:run(Agent, hello, self()),
+
+        ?assertMatch(
+            {error, {policy_exception, error, policy_failed, _}},
+            Result
+        ),
+
+        receive
+            {hayata_agent_result, _InvocationId,
+             {error, {policy_exception, error, policy_failed, _}}} ->
+                ok
+        after 1000 ->
+            error(initial_policy_exception_notification_timeout)
+        end,
+
+        ?assertMatch(
+            {error, {policy_exception, error, policy_failed, _}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
 run_with_invalid_subscription_test() ->
     ?assertEqual(
         {error, invalid_subscription_pid},
