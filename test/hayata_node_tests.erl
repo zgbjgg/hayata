@@ -463,6 +463,7 @@ edge_crash_during_execution_test() ->
         )
     end).
 
+
 edge_result_preserved_after_down_test() ->
     with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
         Parent = self(),
@@ -475,13 +476,14 @@ edge_result_preserved_after_down_test() ->
             end}
         ],
 
-        {ok, execution_result_then_down} =
-            hayata_node:start_execution(
-                Node,
-                execution_result_then_down,
-                EdgeTasks,
-                5000
-            ),
+        ExecutionId = execution_result_then_down,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
 
         EdgePid = receive
             {edge_started, Pid} -> Pid
@@ -489,50 +491,22 @@ edge_result_preserved_after_down_test() ->
             error(edge_start_timeout)
         end,
 
-        try
-            Node ! {
-                hayata_edge_result,
-                edge_01,
-                execution_result_then_down,
-                {ok, result_01}
-            },
+        EdgePid ! continue,
 
-            InfoBeforeDown = hayata_node:get_info(Node),
-            ExecutionsBeforeDown = maps:get(executions, InfoBeforeDown),
-            ExecutionBeforeDown = maps:get(
-                execution_result_then_down,
-                ExecutionsBeforeDown
-            ),
- 
-            ?assertEqual({ok, result_01}, maps:get(edge_01, maps:get(results, ExecutionBeforeDown, #{}))),
+        await_execution_completed(Node, ExecutionId, 200),
+        await_edge_termination(Node, edge_01, ExecutionId, 200),
 
-            exit(EdgePid, kill),
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(ExecutionId, Executions),
 
-            await_execution_completed(
-                Node,
-                execution_result_then_down,
-                200
-            ),
-
-            Info = hayata_node:get_info(Node),
-            Executions = maps:get(executions, Info),
-            Execution = maps:get(
-                execution_result_then_down,
-                Executions
-            ),
-
-            ?assertEqual(
-                {ok, result_01},
-                maps:get(
-                    edge_01,
-                    maps:get(results, Execution)
-                )
-            ),
-            ?assertEqual(#{}, maps:get(errors, Execution)),
-            ?assertEqual([], maps:get(pending_edges, Execution))
-        after
-            exit(EdgePid, kill)
-        end
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, actual_result}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution))
     end).
 
 duplicate_edge_result_preserves_first_test() ->
