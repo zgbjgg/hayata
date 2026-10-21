@@ -560,6 +560,22 @@ duplicate_edge_result_preserves_first_test() ->
             ),
 
             ?assertEqual(
+                #{
+                    {edge_01, execution_duplicate_result} =>
+                        {ok, first_result}
+                },
+                maps:get(edge_results, Info)
+            ),
+
+            ?assertEqual(
+                maps:get(edge_01, maps:get(results, Execution)),
+                maps:get(
+                    {edge_01, execution_duplicate_result},
+                    maps:get(edge_results, Info)
+                )
+            ),
+
+            ?assertEqual(
                 {ok, first_result},
                 maps:get(
                     edge_01,
