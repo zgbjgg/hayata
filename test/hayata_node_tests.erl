@@ -2156,8 +2156,9 @@ cancel_execution_notifies_recipient_test() ->
                 ExecutionId,
                 FinalResult
             } ->
-                ?assertEqual(cancelled, maps:get(status, FinalResult))
-        after 1000 ->
+                ?assertEqual(cancelled, maps:get(status, FinalResult)),
+                ?assertNot(is_process_alive(EdgePid)) 
+       after 1000 ->
             error(cancellation_notification_timeout)
         end
     end).

@@ -1149,6 +1149,8 @@ cancel_execution_internal(ExecutionId, State) ->
             {error, execution_not_found, State}
     end.
 
+-spec cancel_active_execution(term(), map(), #node_state{}) ->
+    {ok, #node_state{}}.
 cancel_active_execution(ExecutionId, Execution, State) ->
     UpdatedExecution = Execution#{status => cancelled},
     Executions = maps:put(
@@ -1157,13 +1159,19 @@ cancel_active_execution(ExecutionId, Execution, State) ->
         State#node_state.executions
     ),
     CancelledState = State#node_state{executions = Executions},
+    ReducerState = cancel_execution_reducer(
+        ExecutionId,
+        CancelledState
+    ),
+    EdgeState = cancel_execution_edges(
+        ExecutionId,
+        ReducerState
+    ),
     notify_execution_recipient(
         ExecutionId,
         UpdatedExecution,
-        CancelledState
+        EdgeState
     ),
-    ReducerState = cancel_execution_reducer(ExecutionId, CancelledState),
-    EdgeState = cancel_execution_edges(ExecutionId, ReducerState),
     {ok, EdgeState}.
 
 -spec cancel_execution_reducer(term(), #node_state{}) -> #node_state{}.
