@@ -937,6 +937,58 @@ ignores_stale_notification_after_node_crash_test() ->
         persistent_term:erase(NodeKey)
     end.
 
+policy_exception_recovers_on_next_invocation_test() ->
+    AgentId = make_ref(),
+    PolicyKey = {?MODULE, AgentId},
+    persistent_term:put(PolicyKey, true),
+
+    Config = #{
+        id => AgentId,
+        state => #{answer => 42},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(Context) ->
+            case persistent_term:get(PolicyKey) of
+                true ->
+                    persistent_term:put(PolicyKey, false),
+                    erlang:error(policy_failed);
+                false ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            ?assertMatch(
+                {error, {policy_exception, error, policy_failed, _}},
+                hayata_agent:run(Agent, first_attempt)
+            ),
+
+            Info = hayata_agent:get_info(Agent),
+
+            ?assertMatch(
+                {error, {policy_exception, error, policy_failed, _}},
+                maps:get(status, Info)
+            ),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            ?assertEqual(
+                completed,
+                maps:get(status, hayata_agent:get_info(Agent))
+            ),
+
+            ?assertEqual(
+                {ok, #{answer => 42}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(PolicyKey)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
