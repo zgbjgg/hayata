@@ -681,7 +681,12 @@ terminal_execution_preserves_results_test() ->
 
         ?assertEqual(completed, maps:get(status, ExecutionBefore)),
 
-        Node ! unrelated_message,
+        Node ! {
+            hayata_edge_result,
+            edge_01,
+            execution_terminal_results,
+            {ok, late_result}
+        },
 
         InfoAfter = hayata_node:get_info(Node),
         ExecutionsAfter = maps:get(executions, InfoAfter),
@@ -701,6 +706,10 @@ terminal_execution_preserves_results_test() ->
         ?assertEqual(
             maps:get(errors, ExecutionBefore),
             maps:get(errors, ExecutionAfter)
+        ),
+        ?assertEqual(
+            maps:get(edge_results, InfoBefore),
+            maps:get(edge_results, InfoAfter)
         )
     end).
 
