@@ -350,7 +350,7 @@ repeated_reducer_failure_test() ->
 reducer_recovery_preserves_deadline_test() ->
     with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
         Parent = self(),
-        TimeoutMs = 600,
+        TimeoutMs = 1200,
         StartedAt = erlang:monotonic_time(millisecond),
 
         EdgeTasks = [
@@ -378,7 +378,7 @@ reducer_recovery_preserves_deadline_test() ->
             error(edge_start_timeout)
         end,
 
-        timer:sleep(350),
+        timer:sleep(800),
 
         Info = hayata_node:get_info(Node),
         ActiveReducers = maps:get(active_reducers, Info),
@@ -406,7 +406,7 @@ reducer_recovery_preserves_deadline_test() ->
         ElapsedMs = erlang:monotonic_time(millisecond) - StartedAt,
 
         ?assert(
-            ElapsedMs < TimeoutMs + 400
+            ElapsedMs < TimeoutMs + 250
         )
     end).
 
