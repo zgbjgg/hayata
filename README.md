@@ -13,7 +13,6 @@ The runtime uses OTP processes, monitoring, and message passing to coordinate ag
 - **Reducer** — a temporary process that collects edge results for an execution and produces a consolidated outcome.
 - **Node supervisor** — supervises node processes and restarts them after abnormal termination.
 
-
 ## How to use Hayata
 
 The following example demonstrates Hayata's graph-based agent API: define a node, define the control flow, start the agent's supervision tree, and invoke it asynchronously.
@@ -139,6 +138,36 @@ EUnit tests cover node restart and invocation failure, stale notifications, redu
 The edge watcher monitors the node independently. If the node dies, including through an untrappable `kill`, the watcher terminates its edge even though the node's `terminate/2` callback cannot run.
 
 **Current limitation:** edge task functions execute synchronously inside the edge GenServer callback. A blocked task prevents that GenServer from processing messages until the callback returns. The watcher can terminate the edge when the node disappears, but cancellation semantics for blocked tasks and their side effects remain an area for further review.
+
+## Decision policy contract
+
+The decision policy is a synchronous, deterministic control-flow function. Its
+responsibility is to decide whether the agent should execute another node or
+finish the current invocation.
+
+A decision policy receives the current agent context and returns one of the
+supported decisions:
+
+- `{next, NodeId, Input}` — schedule the specified node with the given input.
+- `{finish, Result}` — finish the invocation with the provided result.
+- `{error, Reason}` — fail the invocation with the specified reason.
+
+Decision policies should be fast and should not perform long-running operations,
+blocking waits, or external I/O. They are evaluated synchronously by the agent
+coordinator, so a blocked policy prevents the coordinator from processing other
+messages, including invocation timeout messages.
+
+Long-running work belongs in node functions. Nodes can perform operations such
+as LLM requests, HTTP calls, database access, and computationally intensive
+tasks without placing that work directly in the decision policy.
+
+The agent coordinator owns the invocation lifecycle and enforces the global
+invocation timeout. Node execution has its own timeout configuration. Users
+should configure appropriate limits for their workloads while keeping the
+global invocation timeout in mind.
+
+This separation keeps control-flow decisions simple and makes long-running
+work easier to isolate, monitor, cancel, and recover.
 
 ## Requirements
 
