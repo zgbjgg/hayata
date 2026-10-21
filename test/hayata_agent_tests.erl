@@ -291,6 +291,43 @@ recovers_after_execution_timeout_test() ->
         persistent_term:erase(NodeKey)
     end.
 
+completion_before_timeout_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3,
+        execution_timeout => 100
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, hello),
+
+        ?assertEqual(
+            completed,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        ),
+
+        timer:sleep(200),
+
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(completed, maps:get(status, Info)),
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        ),
+        ?assertEqual(undefined, maps:get(active_execution, Info))
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
