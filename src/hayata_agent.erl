@@ -33,6 +33,7 @@
     state = #{},
     nodes = #{},
     node_sup_pid,
+    supervisor_pid,
     decision_policy,
     max_steps,
     current_step = 0,
@@ -79,10 +80,15 @@ get_info(Agent) ->
 get_result(Agent) ->
     gen_server:call(Agent, get_result).
 
--doc("Stops the agent and its managed node processes.").
--spec stop(gen_server:server_ref()) -> ok.
+-doc("Stops the agent and its complete supervision tree.").
+-spec stop(gen_server:server_ref()) -> ok | {error, term()}.
 stop(Agent) ->
-    gen_server:call(Agent, stop, 5000).
+    case gen_server:call(Agent, get_supervisor_pid) of
+        {ok, SupPid} ->
+            gen_server:stop(SupPid, normal, 5000);
+        {error, Reason} ->
+            {error, Reason}
+    end.
 
 -doc(false).
 -spec init(config()) -> {ok, #agent_state{}} | {stop, term()}.
@@ -96,6 +102,7 @@ init(Config) ->
                 state = InitialState,
                 nodes = maps:get(nodes, Config),
                 node_sup_pid = maps:get(node_sup_pid, Config),
+                supervisor_pid = maps:get(supervisor_pid, Config),
                 decision_policy = maps:get(
                     decision_policy,
                     Config,
@@ -156,17 +163,8 @@ handle_call(get_result, _From, #agent_state{status = {error, Reason}} = State) -
     {reply, {error, Reason}, State};
 handle_call(get_result, _From, State) ->
     {reply, {error, no_result}, State};
-
-handle_call(stop, _From, State) ->
-    case stop_nodes(State) of
-        ok ->
-            {stop, normal, ok, State#agent_state{
-                status = stopped,
-                active_execution = undefined
-            }};
-        {error, Reason} ->
-            {reply, {error, Reason}, State}
-    end;
+handle_call(get_supervisor_pid, _From, State) ->
+    {reply, {ok, State#agent_state.supervisor_pid}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -225,22 +223,24 @@ validate_config(Config) when is_map(Config) ->
         maps:find(id, Config),
         maps:find(nodes, Config),
         maps:find(node_sup_pid, Config),
+        maps:find(supervisor_pid, Config),
         maps:find(decision_policy, Config),
         maps:find(max_steps, Config),
         maps:find(state, Config)
     } of
-        {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid},
+        {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
          {ok, Policy}, {ok, MaxSteps}, {ok, InitialState}}
                 when is_map(Nodes),
                      is_pid(NodeSupPid),
+                     is_pid(SupervisorPid),
                      is_function(Policy, 1),
                      is_integer(MaxSteps),
                      MaxSteps > 0,
                      is_map(InitialState) ->
             validate_node_catalog(Nodes);
-        {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid},
+        {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
          error, error, error}
-                when is_map(Nodes), is_pid(NodeSupPid) ->
+                when is_map(Nodes), is_pid(NodeSupPid), is_pid(SupervisorPid) ->
             validate_node_catalog(Nodes);
         _ ->
             {error, invalid_config}
@@ -441,26 +441,6 @@ fail_invocation(Reason, State) ->
         last_error = Reason,
         active_execution = undefined
     }.
-
--spec stop_nodes(#agent_state{}) -> ok | {error, term()}.
-stop_nodes(State) ->
-    stop_nodes(
-        State#agent_state.node_sup_pid,
-        maps:keys(State#agent_state.nodes)
-    ).
-
--spec stop_nodes(pid(), [atom()]) -> ok | {error, term()}.
-stop_nodes(_NodeSupPid, []) ->
-    ok;
-stop_nodes(NodeSupPid, [NodeId | Rest]) ->
-    case hayata_node_sup:stop_node(NodeSupPid, NodeId) of
-        ok ->
-            stop_nodes(NodeSupPid, Rest);
-        {error, not_found} ->
-            stop_nodes(NodeSupPid, Rest);
-        {error, Reason} ->
-            {error, {node_stop_failed, NodeId, Reason}}
-    end.
 
 -spec default_decision_policy(map()) -> {finish, term()}.
 default_decision_policy(Context) ->

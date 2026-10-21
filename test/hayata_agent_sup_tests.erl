@@ -86,6 +86,32 @@ rejects_invalid_node_definition_test() ->
         })
     ).
 
+
+stop_agent_stops_supervision_tree_test() ->
+    AgentId = make_ref(),
+    Config = #{
+        id => AgentId,
+        nodes => #{
+            respond => fun(_State) -> #{} end
+        }
+    },
+
+    {ok, SupPid} = hayata_agent_sup:start_link(Config),
+    unlink(SupPid),
+    {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
+    MonitorRef = erlang:monitor(process, SupPid),
+
+    ?assertEqual(ok, hayata_agent:stop(AgentPid)),
+
+    receive
+        {'DOWN', MonitorRef, process, SupPid, _Reason} ->
+            ok
+    after 5000 ->
+        error(supervisor_shutdown_timeout)
+    end,
+
+    ?assertEqual(undefined, hayata_node:whereis(AgentId, respond)).
+
 with_agent_sup(Config, TestFun) ->
     {ok, SupPid} = hayata_agent_sup:start_link(Config),
     unlink(SupPid),

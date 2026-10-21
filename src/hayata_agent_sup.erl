@@ -168,6 +168,7 @@ start_agent(SupPid, Config) ->
                 state => maps:get(state, Config, #{}),
                 nodes => maps:get(nodes, Config),
                 node_sup_pid => NodeSupPid,
+                supervisor_pid => SupPid,
                 decision_policy => maps:get(
                     decision_policy,
                     Config,

@@ -333,7 +333,13 @@ handle_info(_Info, State) ->
 
 -doc(false).
 -spec terminate(term(), #node_state{}) -> ok.
-terminate(_Reason, _State) ->
+terminate(_Reason, State) ->
+    stop_active_processes(
+        maps:values(State#node_state.active_edges)
+    ),
+    stop_active_processes(
+        maps:values(State#node_state.active_reducers)
+    ),
     ok.
 
 -doc(false).
@@ -1102,3 +1108,12 @@ notify_execution_recipient(ExecutionId, Execution, State) ->
         undefined ->
             ok
     end.
+
+-spec stop_active_processes([map()]) -> ok.
+stop_active_processes([]) ->
+    ok;
+stop_active_processes([#{pid := Pid} | Rest]) ->
+    exit(Pid, shutdown),
+    stop_active_processes(Rest);
+stop_active_processes([_Process | Rest]) ->
+    stop_active_processes(Rest).
