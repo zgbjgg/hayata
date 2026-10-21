@@ -13,7 +13,8 @@
     track_edge/3,
     start_edge/4,
     start_execution/4,
-    start_execution/5
+    start_execution/5,
+    cancel_execution/2
 ]).
 
 -export([
@@ -152,6 +153,12 @@ start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid)
         {start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}
     ).
 
+-doc("Cancels an active execution and its associated processes.").
+-spec cancel_execution(gen_server:server_ref(), term()) ->
+    ok | {error, term()}.
+cancel_execution(Node, ExecutionId) ->
+    gen_server:call(Node, {cancel_execution, ExecutionId}).
+
 %% gen_server callbacks
 
 -doc(false).
@@ -258,6 +265,13 @@ handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}, 
         RecipientPid,
         State
     );
+handle_call({cancel_execution, ExecutionId}, _From, State) ->
+    case cancel_execution_internal(ExecutionId, State) of
+        {ok, NewState} ->
+            {reply, ok, NewState};
+        {error, Reason, NewState} ->
+            {reply, {error, Reason}, NewState}
+    end;
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -979,6 +993,8 @@ is_terminal_status(timed_out) ->
     true;
 is_terminal_status({reducer_recovery_failed, _Reason}) ->
     true;
+is_terminal_status(cancelled) ->
+    true;
 is_terminal_status(_Status) ->
     false.
 
@@ -1117,3 +1133,90 @@ stop_active_processes([#{pid := Pid} | Rest]) ->
     stop_active_processes(Rest);
 stop_active_processes([_Process | Rest]) ->
     stop_active_processes(Rest).
+
+-spec cancel_execution_internal(term(), #node_state{}) ->
+    {ok, #node_state{}} | {error, term(), #node_state{}}.
+cancel_execution_internal(ExecutionId, State) ->
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    {error, execution_not_active, State};
+                false ->
+                    cancel_active_execution(ExecutionId, Execution, State)
+            end;
+        error ->
+            {error, execution_not_found, State}
+    end.
+
+
+-spec cancel_active_execution(term(), map(), #node_state{}) ->
+    {ok, #node_state{}}.
+cancel_active_execution(ExecutionId, Execution, State) ->
+    UpdatedExecution = Execution#{status => cancelled},
+    Executions = maps:put(
+        ExecutionId,
+        UpdatedExecution,
+        State#node_state.executions
+    ),
+    CancelledState = State#node_state{executions = Executions},
+    ReducerState = cancel_execution_reducer(ExecutionId, CancelledState),
+    EdgeState = cancel_execution_edges(ExecutionId, ReducerState),
+    {ok, EdgeState}.
+
+
+-spec cancel_execution_reducer(term(), #node_state{}) -> #node_state{}.
+cancel_execution_reducer(ExecutionId, State) ->
+    case maps:take(ExecutionId, State#node_state.active_reducers) of
+        {#{pid := Pid, monitor_ref := MonitorRef}, ActiveReducers} ->
+            erlang:demonitor(MonitorRef, [flush]),
+            stop_process(Pid),
+            State#node_state{active_reducers = ActiveReducers};
+        error ->
+            State
+    end.
+
+
+-spec cancel_execution_edges(term(), #node_state{}) -> #node_state{}.
+cancel_execution_edges(ExecutionId, State) ->
+    {CancelledEdges, RemainingEdges} = maps:fold(
+        fun(MonitorRef, Edge, {Cancelled, Remaining}) ->
+            case maps:get(execution_id, Edge) of
+                ExecutionId ->
+                    { [{MonitorRef, Edge} | Cancelled], Remaining };
+                _OtherExecutionId ->
+                    { Cancelled, maps:put(MonitorRef, Edge, Remaining) }
+            end
+        end,
+        {[], #{}},
+        State#node_state.active_edges
+    ),
+    stop_execution_edges(CancelledEdges),
+    State#node_state{active_edges = RemainingEdges}.
+
+
+-spec stop_execution_edges([{reference(), map()}]) -> ok.
+stop_execution_edges([]) ->
+    ok;
+stop_execution_edges([{MonitorRef, #{pid := Pid}} | Rest]) ->
+    erlang:demonitor(MonitorRef, [flush]),
+    stop_process(Pid),
+    stop_execution_edges(Rest).
+
+
+-spec stop_process(pid()) -> ok.
+stop_process(Pid) ->
+    case is_process_alive(Pid) of
+        true ->
+            MonitorRef = erlang:monitor(process, Pid),
+            exit(Pid, kill),
+            receive
+                {'DOWN', MonitorRef, process, Pid, _Reason} ->
+                    ok
+            after 5000 ->
+                erlang:demonitor(MonitorRef, [flush]),
+                ok
+            end;
+        false ->
+            ok
+    end.

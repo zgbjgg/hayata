@@ -41,7 +41,9 @@
     invocation_input = undefined,
     active_execution = undefined,
     result = undefined,
-    last_error = undefined
+    last_error = undefined,
+    execution_timeout = 30000,
+    timeout_ref = undefined
 }).
 
 -type config() :: #{
@@ -108,7 +110,8 @@ init(Config) ->
                     Config,
                     fun default_decision_policy/1
                 ),
-                max_steps = maps:get(max_steps, Config, 10)
+                max_steps = maps:get(max_steps, Config, 10),
+                execution_timeout = maps:get(execution_timeout, Config, 30000)
             }};
         {error, Reason} ->
             {stop, Reason}
@@ -124,6 +127,11 @@ handle_call({run, Input}, _From, State) ->
     case prepare_invocation(State) of
         ok ->
             InvocationId = make_ref(),
+            TimeoutRef = erlang:send_after(
+                State#agent_state.execution_timeout,
+                self(),
+                {invocation_timeout, InvocationId}
+            ),
             NewState = State#agent_state{
                 status = running,
                 state = State#agent_state.initial_state,
@@ -132,7 +140,8 @@ handle_call({run, Input}, _From, State) ->
                 invocation_input = Input,
                 active_execution = undefined,
                 result = undefined,
-                last_error = undefined
+                last_error = undefined,
+                timeout_ref = TimeoutRef
             },
             case evaluate_policy(NewState) of
                 {ok, UpdatedState} ->
@@ -203,6 +212,17 @@ handle_info(
 ) ->
     %% Ignore notifications from old or already completed executions.
     {noreply, State};
+handle_info(
+    {invocation_timeout, InvocationId},
+    #agent_state{
+        status = running,
+        invocation_id = InvocationId
+    } = State
+) ->
+    Reason = timeout,
+    {noreply, fail_invocation(Reason, State#agent_state{
+        timeout_ref = undefined
+    })};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -226,20 +246,22 @@ validate_config(Config) when is_map(Config) ->
         maps:find(supervisor_pid, Config),
         maps:find(decision_policy, Config),
         maps:find(max_steps, Config),
-        maps:find(state, Config)
+        maps:find(state, Config),
+        maps:find(execution_timeout, Config)
     } of
         {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
-         {ok, Policy}, {ok, MaxSteps}, {ok, InitialState}}
+         {ok, Policy}, {ok, MaxSteps}, {ok, InitialState}, {ok, ExecutionTime}}
                 when is_map(Nodes),
                      is_pid(NodeSupPid),
                      is_pid(SupervisorPid),
                      is_function(Policy, 1),
                      is_integer(MaxSteps),
                      MaxSteps > 0,
-                     is_map(InitialState) ->
+                     is_map(InitialState),
+                     ExecutionTime > 0 ->
             validate_node_catalog(Nodes);
         {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
-         error, error, error}
+         error, error, error, error}
                 when is_map(Nodes), is_pid(NodeSupPid), is_pid(SupervisorPid) ->
             validate_node_catalog(Nodes);
         _ ->
@@ -325,7 +347,8 @@ evaluate_policy(State) ->
         {next, NodeId, Input} ->
             start_next_node(NodeId, Input, State);
         {finish, Result} ->
-            {ok, State#agent_state{
+            CancelledState = cancel_invocation_timeout(State),
+            {ok, CancelledState#agent_state{
                 status = completed,
                 result = Result,
                 last_error = undefined,
@@ -435,7 +458,8 @@ apply_node_result(FinalResult, State) ->
 
 -spec fail_invocation(term(), #agent_state{}) -> #agent_state{}.
 fail_invocation(Reason, State) ->
-    State#agent_state{
+    CancelledState = cancel_invocation_timeout(State),
+    CancelledState#agent_state{
         status = {error, Reason},
         result = undefined,
         last_error = Reason,
@@ -445,3 +469,10 @@ fail_invocation(Reason, State) ->
 -spec default_decision_policy(map()) -> {finish, term()}.
 default_decision_policy(Context) ->
     {finish, maps:get(state, Context)}.
+
+-spec cancel_invocation_timeout(#agent_state{}) -> #agent_state{}.
+cancel_invocation_timeout(#agent_state{timeout_ref = undefined} = State) ->
+    State;
+cancel_invocation_timeout(#agent_state{timeout_ref = TimeoutRef} = State) ->
+    _ = erlang:cancel_timer(TimeoutRef),
+    State#agent_state{timeout_ref = undefined}.

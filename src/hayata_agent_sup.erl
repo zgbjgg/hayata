@@ -174,7 +174,8 @@ start_agent(SupPid, Config) ->
                     Config,
                     fun(_Context) -> {finish, #{}} end
                 ),
-                max_steps => maps:get(max_steps, Config, 10)
+                max_steps => maps:get(max_steps, Config, 10),
+                execution_timeout => maps:get(execution_timeout, Config, 3000)
             },
             ChildSpec = #{
                 id => hayata_agent,
