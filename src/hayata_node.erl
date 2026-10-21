@@ -578,7 +578,17 @@ record_execution_error(ExecutionId, EdgeId, Reason, State) ->
 update_execution_edge_result(ExecutionId, EdgeId, Result, State) ->
     case maps:find(ExecutionId, State#node_state.executions) of
         {ok, Execution} ->
-            update_execution_result(Execution, EdgeId, Result, State);
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    State;
+                false ->
+                    update_execution_result(
+                        Execution,
+                        EdgeId,
+                        Result,
+                        State
+                    )
+            end;
         error ->
             State
     end.
@@ -632,17 +642,18 @@ save_execution(Execution, State) ->
 -spec complete_execution(term(), map(), #node_state{}) -> #node_state{}.
 complete_execution(ExecutionId, FinalResult, State) ->
     case maps:find(ExecutionId, State#node_state.executions) of
-        {ok, #{status := Status}}
-                when Status =:= completed;
-                     Status =:= timed_out ->
-            State;
         {ok, Execution} ->
-            complete_execution_result(
-                ExecutionId,
-                Execution,
-                FinalResult,
-                State
-            );
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    State;
+                false ->
+                    complete_execution_result(
+                        ExecutionId,
+                        Execution,
+                        FinalResult,
+                        State
+                    )
+            end;
         error ->
             State
     end.
@@ -733,14 +744,33 @@ find_reducer_execution(MonitorRef, [{ExecutionId, Reducer} | Rest]) ->
             find_reducer_execution(MonitorRef, Rest)
     end.
 
-
 -spec recover_execution_reducer(term(), term(), #node_state{}) ->
     #node_state{}.
 recover_execution_reducer(ExecutionId, Reason, State) ->
-    Execution = maps:get(
-        ExecutionId,
-        State#node_state.executions
-    ),
+    case maps:find(ExecutionId, State#node_state.executions) of
+        {ok, Execution} ->
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    State;
+                false ->
+                    start_recovered_execution_reducer(
+                        ExecutionId,
+                        Execution,
+                        Reason,
+                        State
+                    )
+            end;
+        error ->
+            State
+    end.
+
+-spec start_recovered_execution_reducer(
+    term(),
+    map(),
+    term(),
+    #node_state{}
+) -> #node_state{}.
+start_recovered_execution_reducer(ExecutionId, Execution, Reason, State) ->
     ActiveReducers = maps:remove(
         ExecutionId,
         State#node_state.active_reducers
@@ -749,7 +779,10 @@ recover_execution_reducer(ExecutionId, Reason, State) ->
         active_reducers = ActiveReducers
     },
     Deadline = maps:get(deadline, Execution),
-    RemainingMs = max(0, Deadline - erlang:monotonic_time(millisecond)),
+    RemainingMs = max(
+        0,
+        Deadline - erlang:monotonic_time(millisecond)
+    ),
     Config = #{
         node_pid => self(),
         execution_id => ExecutionId,
@@ -765,7 +798,6 @@ recover_execution_reducer(ExecutionId, Reason, State) ->
                 ReducerPid,
                 BaseState
             );
-
         {error, StartReason} ->
             mark_reducer_recovery_failed(
                 ExecutionId,
@@ -820,14 +852,18 @@ activate_recovered_reducer(ExecutionId, ReducerPid, State) ->
 mark_reducer_recovery_failed(ExecutionId, Reason, State) ->
     case maps:find(ExecutionId, State#node_state.executions) of
         {ok, Execution} ->
-            UpdatedExecution = Execution#{
-                status => {reducer_recovery_failed, Reason}
-            },
-            save_execution(UpdatedExecution, State);
+            case is_terminal_status(maps:get(status, Execution)) of
+                true ->
+                    State;
+                false ->
+                    UpdatedExecution = Execution#{
+                        status => {reducer_recovery_failed, Reason}
+                    },
+                    save_execution(UpdatedExecution, State)
+            end;
         error ->
             State
     end.
-
 
 -spec forward_recovered_edge_result(
     term(),
@@ -911,3 +947,13 @@ recover_invalid_edge_result(EdgeId, Result, {Results, Errors}) ->
         maps:remove(EdgeId, Results),
         maps:put(EdgeId, {invalid_edge_result, Result}, Errors)
     }.
+
+-spec is_terminal_status(term()) -> boolean().
+is_terminal_status(completed) ->
+    true;
+is_terminal_status(timed_out) ->
+    true;
+is_terminal_status({reducer_recovery_failed, _Reason}) ->
+    true;
+is_terminal_status(_Status) ->
+    false.
