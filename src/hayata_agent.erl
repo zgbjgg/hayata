@@ -212,17 +212,13 @@ handle_info(
 ) ->
     %% Ignore notifications from old or already completed executions.
     {noreply, State};
-handle_info(
-    {invocation_timeout, InvocationId},
-    #agent_state{
-        status = running,
-        invocation_id = InvocationId
-    } = State
-) ->
+handle_info({invocation_timeout, InvocationId}, #agent_state{status = running, invocation_id = InvocationId} = State) ->
     Reason = timeout,
-    {noreply, fail_invocation(Reason, State#agent_state{
+    TimedOutState = State#agent_state{
         timeout_ref = undefined
-    })};
+    },
+    CancelledState = cancel_active_execution(TimedOutState),
+    {noreply, fail_invocation(Reason, CancelledState)};
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -476,3 +472,27 @@ cancel_invocation_timeout(#agent_state{timeout_ref = undefined} = State) ->
 cancel_invocation_timeout(#agent_state{timeout_ref = TimeoutRef} = State) ->
     _ = erlang:cancel_timer(TimeoutRef),
     State#agent_state{timeout_ref = undefined}.
+
+-spec cancel_active_execution(#agent_state{}) -> #agent_state{}.
+cancel_active_execution(
+    #agent_state{
+        id = AgentId,
+        active_execution = #{
+            node_id := NodeId,
+            execution_id := ExecutionId
+        }
+    } = State
+) ->
+    case hayata_node:whereis(AgentId, NodeId) of
+        undefined ->
+            State;
+        NodePid ->
+            case hayata_node:cancel_execution(NodePid, ExecutionId) of
+                ok ->
+                    State;
+                {error, _Reason} ->
+                    State
+            end
+    end;
+cancel_active_execution(State) ->
+    State.

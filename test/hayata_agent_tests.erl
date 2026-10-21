@@ -148,6 +148,52 @@ policy_exception_sets_terminal_error_test() ->
         )
     end).
 
+execution_timeout_cancels_node_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            blocking_work => fun(_State) ->
+                Parent ! {node_execution_started, self()},
+                receive
+                    continue ->
+                        #{result => completed}
+                end
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, blocking_work, undefined}
+        end,
+        max_steps => 3,
+        execution_timeout => 500
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        NodeExecutionPid = receive
+            {node_execution_started, Pid} ->
+                Pid
+        after 2000 ->
+            error(node_execution_start_timeout)
+        end,
+
+        try
+            await_terminal_status(Agent, 300),
+
+            ?assertEqual(
+                {error, timeout},
+                hayata_agent:get_result(Agent)
+            ),
+
+            ?assertNot(is_process_alive(NodeExecutionPid))
+        after
+            NodeExecutionPid ! continue
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
