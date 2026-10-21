@@ -1274,6 +1274,73 @@ reducer_recovery_failure_preserves_results_test() ->
         ?assertEqual(#{}, maps:get(errors, FinalExecution))
     end).
 
+reducer_recovery_edge_completes_after_replacement_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        Runs = atomics:new(1, []),
+        ExecutionId = execution_edge_after_replacement,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                atomics:add(Runs, 1, 1),
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, recovered_result}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        EdgePid ! continue,
+
+        await_execution_completed(Node, ExecutionId, 200),
+        await_edge_termination(Node, edge_01, ExecutionId, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(ExecutionId, Executions),
+        ActiveReducers = maps:get(active_reducers, FinalInfo),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, recovered_result}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, Execution)),
+        ?assertEqual([], maps:get(pending_edges, Execution)),
+        ?assertEqual(1, atomics:get(Runs, 1)),
+        ?assertEqual(false, maps:is_key(ExecutionId, ActiveReducers)),
+        ?assert(is_process_alive(ReplacementReducer) =:= false)
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
