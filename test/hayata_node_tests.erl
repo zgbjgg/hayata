@@ -1546,6 +1546,98 @@ reducer_recovery_processes_queued_results_before_timeout_test() ->
         )
     end).
 
+duplicate_edge_down_preserves_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_duplicate_edge_down,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, actual_result}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveEdgesBefore = maps:get(active_edges, InfoBefore),
+
+        {MonitorRef, EdgeInfo} = hd(maps:to_list(ActiveEdgesBefore)),
+        ?assertEqual(EdgePid, maps:get(pid, EdgeInfo)),
+
+        EdgePid ! continue,
+
+        await_execution_completed(Node, ExecutionId, 200),
+        await_edge_termination(Node, edge_01, ExecutionId, 200),
+
+        InfoAfterTermination = hayata_node:get_info(Node),
+        ExecutionsAfterTermination = maps:get(
+            executions,
+            InfoAfterTermination
+        ),
+        ExecutionAfterTermination = maps:get(
+            ExecutionId,
+            ExecutionsAfterTermination
+        ),
+        LastEvent = maps:get(last_edge_event, InfoAfterTermination),
+
+        ?assertEqual(
+            #{edge_01 => {ok, actual_result}},
+            maps:get(results, ExecutionAfterTermination)
+        ),
+        ?assertEqual(#{}, maps:get(errors, ExecutionAfterTermination)),
+        ?assertEqual([], maps:get(pending_edges, ExecutionAfterTermination)),
+        ?assertEqual(
+            #{},
+            maps:get(active_edges, InfoAfterTermination)
+        ),
+
+        Node ! {'DOWN', MonitorRef, process, EdgePid, normal},
+
+        InfoAfterDuplicate = hayata_node:get_info(Node),
+        ExecutionsAfterDuplicate = maps:get(
+            executions,
+            InfoAfterDuplicate
+        ),
+        ExecutionAfterDuplicate = maps:get(
+            ExecutionId,
+            ExecutionsAfterDuplicate
+        ),
+
+        ?assertEqual(
+            completed,
+            maps:get(status, ExecutionAfterDuplicate)
+        ),
+        ?assertEqual(
+            #{edge_01 => {ok, actual_result}},
+            maps:get(results, ExecutionAfterDuplicate)
+        ),
+        ?assertEqual(#{}, maps:get(errors, ExecutionAfterDuplicate)),
+        ?assertEqual([], maps:get(pending_edges, ExecutionAfterDuplicate)),
+        ?assertEqual(
+            #{},
+            maps:get(active_edges, InfoAfterDuplicate)
+        ),
+        ?assertEqual(
+            LastEvent,
+            maps:get(last_edge_event, InfoAfterDuplicate)
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
