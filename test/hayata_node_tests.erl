@@ -1929,6 +1929,99 @@ cancel_execution_test() ->
         ?assertEqual(0, map_size(maps:get(active_reducers, FinalInfo)))
     end).
 
+cancel_execution_isolation_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        FirstEdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, execution_01, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        SecondEdgeTasks = [
+            {edge_02, fun() ->
+                Parent ! {edge_started, execution_02, self()},
+                receive
+                    continue -> {ok, result_02}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_01},
+            hayata_node:start_execution(
+                Node,
+                execution_01,
+                FirstEdgeTasks,
+                5000
+            )
+        ),
+
+        ?assertEqual(
+            {ok, execution_02},
+            hayata_node:start_execution(
+                Node,
+                execution_02,
+                SecondEdgeTasks,
+                5000
+            )
+        ),
+
+        FirstEdgePid = receive
+            {edge_started, execution_01, FirstPid} ->
+                FirstPid
+        after 1000 ->
+            error(first_edge_start_timeout)
+        end,
+
+        SecondEdgePid = receive
+            {edge_started, execution_02, SecondPid} ->
+                SecondPid
+        after 1000 ->
+            error(second_edge_start_timeout)
+        end,
+
+        ?assert(is_process_alive(FirstEdgePid)),
+        ?assert(is_process_alive(SecondEdgePid)),
+
+        ?assertEqual(
+            ok,
+            hayata_node:cancel_execution(Node, execution_01)
+        ),
+
+        ?assertNot(is_process_alive(FirstEdgePid)),
+        ?assert(is_process_alive(SecondEdgePid)),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+
+        FirstExecution = maps:get(execution_01, Executions),
+        SecondExecution = maps:get(execution_02, Executions),
+
+        ?assertEqual(cancelled, maps:get(status, FirstExecution)),
+        ?assertNotEqual(cancelled, maps:get(status, SecondExecution)),
+
+        SecondEdgePid ! continue,
+
+        await_execution_completed(Node, execution_02, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        FinalExecutions = maps:get(executions, FinalInfo),
+
+        ?assertEqual(
+            cancelled,
+            maps:get(status, maps:get(execution_01, FinalExecutions))
+        ),
+        ?assertEqual(
+            completed,
+            maps:get(status, maps:get(execution_02, FinalExecutions))
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
