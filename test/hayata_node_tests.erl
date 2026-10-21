@@ -1341,6 +1341,107 @@ reducer_recovery_edge_completes_after_replacement_test() ->
         ?assert(is_process_alive(ReplacementReducer) =:= false)
     end).
 
+reducer_recovery_preserves_concurrent_edge_results_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        Runs = atomics:new(2, []),
+        ExecutionId = execution_concurrent_edge_recovery,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                atomics:add(Runs, 1, 1),
+                Parent ! {edge_started, edge_01, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end},
+            {edge_02, fun() ->
+                atomics:add(Runs, 2, 1),
+                Parent ! {edge_started, edge_02, self()},
+                receive
+                    continue -> {error, expected_failure}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePids = receive_edge_pids(2, #{}),
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        EdgeMonitors = [
+            {EdgeId, Pid, erlang:monitor(process, Pid)}
+            || {EdgeId, Pid} <- maps:to_list(EdgePids)
+        ],
+
+        try
+            ok = sys:suspend(Node),
+            exit(OriginalReducer, kill),
+
+            maps:foreach(
+                fun(_EdgeId, Pid) ->
+                    Pid ! continue
+                end,
+                EdgePids
+            ),
+
+            lists:foreach(
+                fun({EdgeId, Pid, MonitorRef}) ->
+                    receive
+                        {'DOWN', MonitorRef, process, Pid, Reason}
+                                when EdgeId =:= edge_01,
+                                     Reason =:= normal ->
+                            ok;
+                        {'DOWN', MonitorRef, process, Pid,
+                         {edge_failed, expected_failure}}
+                                when EdgeId =:= edge_02 ->
+                            ok;
+                        {'DOWN', MonitorRef, process, Pid, Reason} ->
+                            error({unexpected_edge_exit, EdgeId, Reason})
+                    after 1000 ->
+                        error({edge_termination_timeout, EdgeId})
+                    end
+                end,
+                EdgeMonitors
+            )
+        after
+            case sys:resume(Node) of
+                ok -> ok;
+                _ -> ok
+            end
+        end,
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_01 => {ok, result_01}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(
+            #{edge_02 => expected_failure},
+            maps:get(errors, Execution)
+        ),
+        ?assertEqual([], maps:get(pending_edges, Execution)),
+        ?assertEqual(1, atomics:get(Runs, 1)),
+        ?assertEqual(1, atomics:get(Runs, 2))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -1537,4 +1638,18 @@ await_edge_failure_termination(Node, EdgeId, ExecutionId, Attempts) ->
                 ExecutionId,
                 Attempts - 1
             )
+    end.
+
+
+receive_edge_pids(0, EdgePids) ->
+    EdgePids;
+receive_edge_pids(Count, EdgePids) ->
+    receive
+        {edge_started, EdgeId, Pid} ->
+            receive_edge_pids(
+                Count - 1,
+                maps:put(EdgeId, Pid, EdgePids)
+            )
+    after 1000 ->
+        error(edge_start_timeout)
     end.
