@@ -1183,6 +1183,97 @@ reducer_recovery_ignores_stale_result_test() ->
         ?assertEqual([], maps:get(pending_edges, Execution))
     end).
 
+reducer_recovery_failure_preserves_results_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_recovery_failure_preserves_results,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                {ok, first_result}
+            end},
+            {edge_02, fun() ->
+                Parent ! {second_edge_started, self()},
+                receive
+                    continue -> {ok, second_result}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        await_execution_result(Node, ExecutionId, edge_01, 100),
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        SecondEdgePid = receive
+            {second_edge_started, Pid} -> Pid
+        after 1000 ->
+            error(second_edge_start_timeout)
+        end,
+
+        exit(OriginalReducer, kill),
+
+        ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        exit(ReplacementReducer, kill),
+
+        await_recovery_failed(Node, ExecutionId, 100),
+
+        InfoAfterFailure = hayata_node:get_info(Node),
+        ExecutionsAfterFailure = maps:get(
+            executions,
+            InfoAfterFailure
+        ),
+        ExecutionAfterFailure = maps:get(
+            ExecutionId,
+            ExecutionsAfterFailure
+        ),
+
+        ?assertMatch(
+            {reducer_recovery_failed, _},
+            maps:get(status, ExecutionAfterFailure)
+        ),
+        ?assertEqual(
+            #{edge_01 => {ok, first_result}},
+            maps:get(results, ExecutionAfterFailure)
+        ),
+        ?assertEqual(#{}, maps:get(errors, ExecutionAfterFailure)),
+
+        SecondEdgePid ! continue,
+
+        timer:sleep(20),
+
+        FinalInfo = hayata_node:get_info(Node),
+        FinalExecutions = maps:get(executions, FinalInfo),
+        FinalExecution = maps:get(ExecutionId, FinalExecutions),
+
+        ?assertMatch(
+            {reducer_recovery_failed, _},
+            maps:get(status, FinalExecution)
+        ),
+        ?assertEqual(
+            #{edge_01 => {ok, first_result}},
+            maps:get(results, FinalExecution)
+        ),
+        ?assertEqual(#{}, maps:get(errors, FinalExecution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
