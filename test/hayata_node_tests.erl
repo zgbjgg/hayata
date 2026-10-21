@@ -1001,6 +1001,82 @@ reducer_recovery_with_edge_termination_test() ->
         ?assertEqual(1, atomics:get(Runs, 1))
     end).
 
+reducer_recovery_with_edge_failure_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        Runs = atomics:new(1, []),
+        ExecutionId = execution_recovery_edge_failure,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                atomics:add(Runs, 1, 1),
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {error, expected_failure}
+                end
+            end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducers
+        ),
+
+        EdgeMonitor = erlang:monitor(process, EdgePid),
+
+        try
+            ok = sys:suspend(Node),
+            exit(OriginalReducer, kill),
+            EdgePid ! continue,
+
+            receive
+                {'DOWN', EdgeMonitor, process, EdgePid,
+                 {edge_failed, expected_failure}} ->
+                    ok;
+                {'DOWN', EdgeMonitor, process, EdgePid, Reason} ->
+                    error({unexpected_edge_exit, Reason})
+            after 1000 ->
+                error(edge_termination_timeout)
+            end
+        after
+            case sys:resume(Node) of
+                ok -> ok;
+                _ -> ok
+            end
+        end,
+
+        await_execution_completed(Node, ExecutionId, 200),
+        await_edge_failure_termination(Node, edge_01, ExecutionId, 200),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(#{}, maps:get(results, Execution)),
+        ?assertEqual(
+            #{edge_01 => expected_failure},
+            maps:get(errors, Execution)
+        ),
+        ?assertEqual([], maps:get(pending_edges, Execution)),
+        ?assertEqual(1, atomics:get(Runs, 1))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -1170,6 +1246,31 @@ await_execution_error(Node, ExecutionId, EdgeId, Attempts) ->
                 Node,
                 ExecutionId,
                 EdgeId,
+                Attempts - 1
+            )
+    end.
+
+
+await_edge_failure_termination(_Node, _EdgeId, _ExecutionId, 0) ->
+    error(edge_failure_termination_timeout);
+await_edge_failure_termination(Node, EdgeId, ExecutionId, Attempts) ->
+    Info = hayata_node:get_info(Node),
+    ActiveEdges = maps:get(active_edges, Info),
+    LastEvent = maps:get(last_edge_event, Info),
+
+    case {map_size(ActiveEdges), LastEvent} of
+        {0, #{
+            edge_id := EdgeId,
+            execution_id := ExecutionId,
+            reason := {edge_failed, expected_failure}
+        }} ->
+            ok;
+        _ ->
+            timer:sleep(10),
+            await_edge_failure_termination(
+                Node,
+                EdgeId,
+                ExecutionId,
                 Attempts - 1
             )
     end.
