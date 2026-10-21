@@ -989,6 +989,80 @@ policy_exception_recovers_on_next_invocation_test() ->
         persistent_term:erase(PolicyKey)
     end.
 
+run_with_subscription_notifies_success_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} =
+            hayata_agent:run(Agent, hello, self()),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(success_notification_timeout)
+        end
+    end).
+
+run_with_subscription_notifies_timeout_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            blocking_work => fun(_State) ->
+                Parent ! {node_execution_started, self()},
+                receive
+                    continue -> #{result => completed}
+                end
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, blocking_work, undefined}
+        end,
+        max_steps => 3,
+        execution_timeout => 200
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} =
+            hayata_agent:run(Agent, hello, self()),
+
+        receive
+            {node_execution_started, ExecutionPid} ->
+                try
+                    receive
+                        {hayata_agent_result, InvocationId, {error, timeout}} ->
+                            ?assertEqual(
+                                {error, timeout},
+                                hayata_agent:get_result(Agent)
+                            )
+                    after 2000 ->
+                        error(timeout_notification_timeout)
+                    end
+                after
+                    ExecutionPid ! continue
+                end
+        after 1000 ->
+            error(node_execution_start_timeout)
+        end
+    end).
+
+run_with_invalid_subscription_test() ->
+    ?assertEqual(
+        {error, invalid_subscription_pid},
+        hayata_agent:run(self(), hello, not_a_pid)
+    ).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->

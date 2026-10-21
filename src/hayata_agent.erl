@@ -1,9 +1,3 @@
-
-%%%-------------------------------------------------------------------
-%% @doc Coordinates node execution for a Hayata agent.
-%% @end
-%%%-------------------------------------------------------------------
-
 -module(hayata_agent).
 
 -behaviour(gen_server).
@@ -11,6 +5,7 @@
 -export([
     start_link/1,
     run/2,
+    run/3,
     get_state/1,
     get_info/1,
     get_result/1,
@@ -38,6 +33,7 @@
     max_steps,
     current_step = 0,
     invocation_id = undefined,
+    subscription_pid = undefined,
     invocation_input = undefined,
     active_execution = undefined,
     result = undefined,
@@ -64,7 +60,15 @@ start_link(Config) ->
 -spec run(gen_server:server_ref(), term()) ->
     {ok, reference()} | {error, term()}.
 run(Agent, Input) ->
-    gen_server:call(Agent, {run, Input}, 5000).
+    gen_server:call(Agent, {run, Input, undefined}, 5000).
+
+-doc("Starts an asynchronous agent invocation and sends its terminal result to a subscription process.").
+-spec run(gen_server:server_ref(), term(), pid()) ->
+    {ok, reference()} | {error, term()}.
+run(Agent, Input, SubscriptionPid) when is_pid(SubscriptionPid) ->
+    gen_server:call(Agent, {run, Input, SubscriptionPid}, 5000);
+run(_Agent, _Input, _SubscriptionPid) ->
+    {error, invalid_subscription_pid}.
 
 -doc("Returns the current agent context.").
 -spec get_state(gen_server:server_ref()) -> map().
@@ -121,9 +125,9 @@ init(Config) ->
 -spec handle_call(term(), gen_server:from(), #agent_state{}) ->
     {reply, term(), #agent_state{}} |
     {stop, term(), term(), #agent_state{}}.
-handle_call({run, _Input}, _From, #agent_state{status = running} = State) ->
+handle_call({run, _Input, _SubscriptionPid}, _From, #agent_state{status = running} = State) ->
     {reply, {error, already_running}, State};
-handle_call({run, Input}, _From, State) ->
+handle_call({run, Input, SubscriptionPid}, _From, State) ->
     case prepare_invocation(State) of
         ok ->
             InvocationId = make_ref(),
@@ -137,6 +141,7 @@ handle_call({run, Input}, _From, State) ->
                 state = State#agent_state.initial_state,
                 current_step = 0,
                 invocation_id = InvocationId,
+                subscription_pid = SubscriptionPid,
                 invocation_input = Input,
                 active_execution = undefined,
                 result = undefined,
@@ -344,12 +349,13 @@ evaluate_policy(State) ->
             start_next_node(NodeId, Input, State);
         {finish, Result} ->
             CancelledState = cancel_invocation_timeout(State),
-            {ok, CancelledState#agent_state{
+            CompletedState = CancelledState#agent_state{
                 status = completed,
                 result = Result,
                 last_error = undefined,
                 active_execution = undefined
-            }};
+            },
+            {ok, notify_invocation_result(CompletedState, {ok, Result})};
         {error, Reason} ->
             {error, Reason, fail_invocation(Reason, State)};
         Other ->
@@ -455,12 +461,13 @@ apply_node_result(FinalResult, State) ->
 -spec fail_invocation(term(), #agent_state{}) -> #agent_state{}.
 fail_invocation(Reason, State) ->
     CancelledState = cancel_invocation_timeout(State),
-    CancelledState#agent_state{
+    FailedState = CancelledState#agent_state{
         status = {error, Reason},
         result = undefined,
         last_error = Reason,
         active_execution = undefined
-    }.
+    },
+    notify_invocation_result(FailedState, {error, Reason}).
 
 -spec default_decision_policy(map()) -> {finish, term()}.
 default_decision_policy(Context) ->
@@ -495,4 +502,12 @@ cancel_active_execution(
             end
     end;
 cancel_active_execution(State) ->
+    State.
+
+-spec notify_invocation_result(#agent_state{}, term()) ->
+    #agent_state{}.
+notify_invocation_result(#agent_state{invocation_id = InvocationId, subscription_pid = SubscriptionPid} = State, Outcome) when is_pid(SubscriptionPid) ->
+    SubscriptionPid ! {hayata_agent_result, InvocationId, Outcome},
+    State#agent_state{subscription_pid = undefined};
+notify_invocation_result(State, _Outcome) ->
     State.
