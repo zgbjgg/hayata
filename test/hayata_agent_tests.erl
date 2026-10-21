@@ -573,6 +573,69 @@ restarts_node_after_completed_invocation_test() ->
         persistent_term:erase(NodeKey)
     end.
 
+restarts_node_after_failed_invocation_test() ->
+    AgentId = make_ref(),
+    FailureKey = {?MODULE, AgentId},
+    persistent_term:put(FailureKey, true),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                case persistent_term:get(FailureKey) of
+                    true ->
+                        persistent_term:put(FailureKey, false),
+                        erlang:error(first_attempt_failed);
+                    false ->
+                        #{result => recovered}
+                end
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            FirstNodePid = hayata_node:whereis(AgentId, work),
+            ?assert(is_pid(FirstNodePid)),
+
+            {ok, _FirstInvocation} =
+                hayata_agent:run(Agent, first_attempt),
+
+            await_terminal_status(Agent, 300),
+
+            ?assertMatch(
+                {error, _Reason},
+                hayata_agent:get_result(Agent)
+            ),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            SecondNodePid = hayata_node:whereis(AgentId, work),
+
+            ?assert(is_pid(SecondNodePid)),
+            ?assertNotEqual(FirstNodePid, SecondNodePid),
+            ?assertNot(is_process_alive(FirstNodePid)),
+
+            await_status(Agent, completed, 300),
+
+            ?assertEqual(
+                {ok, #{result => recovered}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(FailureKey)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
