@@ -11,7 +11,8 @@
 -export([
     start_link/1,
     init/1,
-    node_supervisor/1
+    node_supervisor/1,
+    agent/1
 ]).
 
 -type config() :: #{
@@ -28,7 +29,13 @@ start_link(Config) ->
                 {ok, SupPid} ->
                     case start_nodes(SupPid, Config) of
                         ok ->
-                            {ok, SupPid};
+                            case start_agent(SupPid, Config) of
+                                ok ->
+                                    {ok, SupPid};
+                                {error, Reason} ->
+                                    exit(SupPid, shutdown),
+                                    {error, Reason}
+                            end;
                         {error, Reason} ->
                             exit(SupPid, shutdown),
                             {error, Reason}
@@ -38,6 +45,21 @@ start_link(Config) ->
             end;
         {error, Reason} ->
             {error, Reason}
+    end.
+
+-doc("Returns the PID of the agent coordinator.").
+-spec agent(pid()) -> {ok, pid()} | {error, term()}.
+agent(SupPid) ->
+    case lists:keyfind(
+        hayata_agent,
+        1,
+        supervisor:which_children(SupPid)
+    ) of
+        {hayata_agent, AgentPid, worker, _Modules}
+                when is_pid(AgentPid) ->
+            {ok, AgentPid};
+        _ ->
+            {error, agent_not_found}
     end.
 
 -doc("Returns the PID of the agent's node supervisor.").
@@ -134,4 +156,39 @@ start_nodes(NodeSupPid, AgentId, [{NodeId, _NodeFun} | Rest]) ->
             start_nodes(NodeSupPid, AgentId, Rest);
         {error, Reason} ->
             {error, {node_start_failed, NodeId, Reason}}
+    end.
+
+
+-spec start_agent(pid(), config()) -> ok | {error, term()}.
+start_agent(SupPid, Config) ->
+    case node_supervisor(SupPid) of
+        {ok, NodeSupPid} ->
+            AgentConfig = #{
+                id => maps:get(id, Config),
+                state => maps:get(state, Config, #{}),
+                nodes => maps:get(nodes, Config),
+                node_sup_pid => NodeSupPid,
+                decision_policy => maps:get(
+                    decision_policy,
+                    Config,
+                    fun(_Context) -> {finish, #{}} end
+                ),
+                max_steps => maps:get(max_steps, Config, 10)
+            },
+            ChildSpec = #{
+                id => hayata_agent,
+                start => {hayata_agent, start_link, [AgentConfig]},
+                restart => temporary,
+                shutdown => 5000,
+                type => worker,
+                modules => [hayata_agent]
+            },
+            case supervisor:start_child(SupPid, ChildSpec) of
+                {ok, _AgentPid} ->
+                    ok;
+                {error, Reason} ->
+                    {error, {agent_start_failed, Reason}}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
