@@ -28,7 +28,6 @@ This example uses a mock node; it does not call an LLM.
 run() ->
     AgentId = hello_agent,
 
-    %% 1. Define a node function.
     MockLlm = fun(State) ->
         Message = maps:get(input, State, <<"Hola">>),
         #{
@@ -39,8 +38,8 @@ run() ->
         }
     end,
 
-    %% 2. Define the node catalog and control flow.
     Nodes = #{mock_llm => MockLlm},
+
     DecisionPolicy = fun(Context) ->
         case maps:get(step, Context) of
             0 ->
@@ -59,24 +58,32 @@ run() ->
         execution_timeout => 5000
     },
 
-    %% 3. Start the agent supervision tree.
-    {ok, SupPid} = hayata_agent_sup:start_link(Config),
-    {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
+    case hayata_sup:start_agent(Config) of
+        {ok, AgentSupPid} ->
+            try
+                run_agent(AgentSupPid)
+            after
+                hayata_sup:stop_agent(AgentSupPid)
+            end;
+        {error, Reason} ->
+            {error, {agent_start_failed, Reason}}
+    end.
 
-    try
-        %% 4. Invoke the agent and subscribe to its result.
-        case hayata_agent:run(
-            AgentPid,
-            #{input => <<"Hola">>},
-            self()
-        ) of
-            {ok, InvocationId} ->
-                await_result(InvocationId, 100);
-            {error, Reason} ->
-                {error, Reason}
-        end
-    after
-        ok = hayata_agent:stop(AgentPid)
+run_agent(AgentSupPid) ->
+    case hayata_agent_sup:agent(AgentSupPid) of
+        {ok, AgentPid} ->
+            case hayata_agent:run(
+                AgentPid,
+                #{input => <<"Hola">>},
+                self()
+            ) of
+                {ok, InvocationId} ->
+                    await_result(InvocationId, 100);
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
     end.
 
 await_result(_InvocationId, 0) ->
