@@ -1,5 +1,11 @@
 # Hayata
 
+[![Hex.pm](https://img.shields.io/hexpm/v/hayata.svg)](https://hex.pm/packages/hayata)
+[![Build Status](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml/badge.svg)](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml)
+[![License: MIT](https://img.shields.io/github/license/zgbjgg/hayata.svg)](https://raw.githubusercontent.com/zgbjgg/hayata/master/LICENSE)
+[![Hex.pm](https://img.shields.io/hexpm/dt/hayata.svg)](https://hex.pm/packages/hayata)
+[![Hex.pm](https://img.shields.io/hexpm/dw/hayata.svg)](https://hex.pm/packages/hayata)
+
 Hayata is an Erlang/OTP framework for building AI agents around a graph-based execution model.
 
 The runtime uses OTP processes, monitoring, and message passing to coordinate agent execution while keeping process responsibilities and state ownership explicit. It is intended to be usable from Erlang and Elixir applications.
