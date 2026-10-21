@@ -43,12 +43,12 @@ run() ->
     DecisionPolicy = fun(Context) ->
         case maps:get(step, Context) of
             0 ->
-                {next, mock_llm, undefined};
+                {next, mock_llm, <<"Hola">>};
             1 ->
                 {finish, maps:get(state, Context)}
         end
     end,
-
+    
     Config = #{
         id => AgentId,
         state => #{},
@@ -71,7 +71,6 @@ run() ->
 
         %% 5. Wait for the asynchronous invocation to finish.
         Result = await_result(AgentPid, 100),
-        io:format("~p~n", [Result]),
         Result
     after
         %% Stop the agent and its supervised processes.
