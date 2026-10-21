@@ -2162,6 +2162,72 @@ cancel_execution_notifies_recipient_test() ->
         end
     end).
 
+node_crash_terminates_active_edges_test() ->
+    Parent = self(),
+    {ok, Node} = hayata_node:start_link(
+        make_ref(),
+        think_01,
+        think,
+        #{},
+        []
+    ),
+    unlink(Node),
+    NodeMonitor = erlang:monitor(process, Node),
+
+    try
+        ?assertEqual(
+            {ok, execution_node_crash},
+            hayata_node:start_execution(
+                Node,
+                execution_node_crash,
+                [
+                    {edge_01, fun() ->
+                        Parent ! {edge_started, self()},
+                        receive
+                            continue -> {ok, result_01}
+                        end
+                    end}
+                ],
+                5000
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+        EdgeMonitor = erlang:monitor(process, EdgePid),
+
+        exit(Node, kill),
+
+        receive
+            {'DOWN', NodeMonitor, process, Node, killed} -> ok
+        after 1000 ->
+            error(node_termination_timeout)
+        end,
+
+        receive
+            {'DOWN', EdgeMonitor, process, EdgePid, _Reason} -> ok
+        after 1000 ->
+            ?assertNot(is_process_alive(EdgePid))
+        end,
+
+        ?assertNot(is_process_alive(EdgePid))
+    after
+        case process_info(self(), messages) of
+            {messages, Messages} ->
+                case lists:keyfind(edge_started, 1, Messages) of
+                    {edge_started, StartedPid} ->
+                        StartedPid ! continue;  
+                    false ->
+                        ok
+                end;
+            undefined ->
+                ok
+        end
+    end.
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->

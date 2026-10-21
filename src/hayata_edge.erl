@@ -31,7 +31,7 @@
 -type task_fun() :: fun(() -> task_result()).
 
 
- -doc("Starts an anonymous, unlinked edge process.").
+ -doc("Starts an anonymous, linked edge process.").
 -spec start(pid(), edge_id(), execution_id(), task_fun()) ->
     gen_server:start_ret().
 start(NodePid, EdgeId, ExecutionId, TaskFun)
@@ -66,6 +66,9 @@ execute(EdgePid) ->
     task_fun()
 }) -> {ok, #edge_state{}}.
 init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun}) ->
+    EdgePid = self(),
+    spawn(fun() -> watch_processes(NodePid, EdgePid) end),
+
     {ok, #edge_state{
         node_pid = NodePid,
         reducer_pid = ReducerPid,
@@ -142,3 +145,18 @@ code_change(_OldVersion, State, _Extra) ->
     {ok, State}.
 
 %% Internal functions
+
+-spec watch_processes(pid(), pid()) -> ok.
+watch_processes(NodePid, EdgePid) ->
+    NodeMonitor = erlang:monitor(process, NodePid),
+    EdgeMonitor = erlang:monitor(process, EdgePid),
+
+    receive
+        {'DOWN', NodeMonitor, process, NodePid, _Reason} ->
+            exit(EdgePid, kill),
+            ok;
+
+        {'DOWN', EdgeMonitor, process, EdgePid, _Reason} ->
+            erlang:demonitor(NodeMonitor, [flush]),
+            ok
+    end.
