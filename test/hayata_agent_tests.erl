@@ -1097,6 +1097,46 @@ run_with_invalid_subscription_test() ->
         hayata_agent:run(self(), hello, not_a_pid)
     ).
 
+run_with_subscription_reuses_subscriber_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(Context) ->
+            {finish, maps:get(input, Context)}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, FirstInvocation} =
+            hayata_agent:run(Agent, first, self()),
+
+        receive
+            {hayata_agent_result, FirstInvocation, {ok, first}} ->
+                ok
+        after 1000 ->
+            error(first_invocation_notification_timeout)
+        end,
+
+        {ok, SecondInvocation} =
+            hayata_agent:run(Agent, second, self()),
+
+        ?assertNotEqual(FirstInvocation, SecondInvocation),
+
+        receive
+            {hayata_agent_result, SecondInvocation, {ok, second}} ->
+                ok
+        after 1000 ->
+            error(second_invocation_notification_timeout)
+        end,
+
+        ?assertEqual(
+            {ok, second},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
