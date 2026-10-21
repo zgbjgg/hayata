@@ -2022,6 +2022,95 @@ cancel_execution_isolation_test() ->
         )
     end).
 
+cancel_nonexistent_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ?assertEqual(
+            {error, execution_not_found},
+            hayata_node:cancel_execution(Node, nonexistent_execution)
+        ),
+
+        Info = hayata_node:get_info(Node),
+        ?assertEqual(#{}, maps:get(executions, Info))
+    end).
+
+cancel_completed_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        EdgeTasks = [
+            {edge_01, fun() -> {ok, result_01} end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_completed},
+            hayata_node:start_execution(
+                Node,
+                execution_completed,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        await_execution_completed(Node, execution_completed, 200),
+
+        ?assertEqual(
+            {error, execution_not_active},
+            hayata_node:cancel_execution(Node, execution_completed)
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(execution_completed, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution))
+    end).
+
+cancel_already_cancelled_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_cancelled},
+            hayata_node:start_execution(
+                Node,
+                execution_cancelled,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        ?assertEqual(
+            ok,
+            hayata_node:cancel_execution(Node, execution_cancelled)
+        ),
+
+        ?assertNot(is_process_alive(EdgePid)),
+
+        ?assertEqual(
+            {error, execution_not_active},
+            hayata_node:cancel_execution(Node, execution_cancelled)
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(execution_cancelled, Executions),
+
+        ?assertEqual(cancelled, maps:get(status, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
