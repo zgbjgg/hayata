@@ -328,6 +328,123 @@ completion_before_timeout_test() ->
         ?assertEqual(undefined, maps:get(active_execution, Info))
     end).
 
+ignores_stale_execution_notification_test() ->
+    Parent = self(),
+    NodeKey = {?MODULE, make_ref()},
+    persistent_term:put(NodeKey, 0),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                Attempt = persistent_term:get(NodeKey),
+                persistent_term:put(NodeKey, Attempt + 1),
+                case Attempt of
+                    0 ->
+                        Parent ! {first_execution_started, self()},
+                        receive
+                            continue_first ->
+                                #{result => stale}
+                        end;
+                    1 ->
+                        Parent ! {second_execution_started, self()},
+                        receive
+                            continue_second ->
+                                #{result => fresh}
+                        end
+                end
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3,
+        execution_timeout => 500
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            {ok, _FirstInvocation} =
+                hayata_agent:run(Agent, first_attempt),
+
+            _FirstExecutionPid = receive
+                {first_execution_started, Pid1} ->
+                    Pid1
+            after 2000 ->
+                error(first_execution_start_timeout)
+            end,
+
+            FirstInfo = hayata_agent:get_info(Agent),
+            FirstExecution = maps:get(active_execution, FirstInfo),
+            OldExecutionId = maps:get(execution_id, FirstExecution),
+
+            await_terminal_status(Agent, 300),
+
+            ?assertEqual(
+                {error, timeout},
+                hayata_agent:get_result(Agent)
+            ),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            SecondExecutionPid = receive
+                {second_execution_started, Pid2} ->
+                    Pid2
+            after 2000 ->
+                error(second_execution_start_timeout)
+            end,
+
+            SecondInfo = hayata_agent:get_info(Agent),
+            SecondExecution = maps:get(active_execution, SecondInfo),
+
+            ?assertNotEqual(
+                OldExecutionId,
+                maps:get(execution_id, SecondExecution)
+            ),
+
+            StaleResult = #{
+                status => completed,
+                errors => #{},
+                results => #{
+                    node_result => {ok, #{result => stale}}
+                }
+            },
+
+            Agent ! {
+                hayata_node_execution,
+                work,
+                OldExecutionId,
+                StaleResult
+            },
+
+            timer:sleep(50),
+
+            CurrentInfo = hayata_agent:get_info(Agent),
+
+            ?assertEqual(running, maps:get(status, CurrentInfo)),
+            ?assertEqual(
+                SecondExecution,
+                maps:get(active_execution, CurrentInfo)
+            ),
+
+            SecondExecutionPid ! continue_second,
+
+            await_status(Agent, completed, 300),
+
+            ?assertEqual(
+                {ok, #{result => fresh}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(NodeKey)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
