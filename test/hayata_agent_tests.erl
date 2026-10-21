@@ -206,6 +206,91 @@ execution_timeout_cancels_node_test() ->
         end
     end).
 
+recovers_after_execution_timeout_test() ->
+    Parent = self(),
+    NodeKey = {?MODULE, make_ref()},
+    persistent_term:put(NodeKey, 0),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                Attempt = persistent_term:get(NodeKey),
+                persistent_term:put(NodeKey, Attempt + 1),
+                case Attempt of
+                    0 ->
+                        Parent ! {first_execution_started, self()},
+                        receive
+                            continue ->
+                                #{result => stale}
+                        end;
+                    1 ->
+                        #{result => fresh}
+                end
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3,
+        execution_timeout => 500
+    },
+
+    try
+        with_agent(Config, fun(Agent) ->
+            {ok, _FirstInvocation} =
+                hayata_agent:run(Agent, first_attempt),
+
+            FirstExecutionPid = receive
+                {first_execution_started, Pid} ->
+                    Pid
+            after 2000 ->
+                error(first_execution_start_timeout)
+            end,
+
+            await_terminal_status(Agent, 300),
+
+            ?assertEqual(
+                {error, timeout},
+                hayata_agent:get_result(Agent)
+            ),
+
+            {ok, _SecondInvocation} =
+                hayata_agent:run(Agent, second_attempt),
+
+            await_status(Agent, completed, 300),
+
+            ?assertEqual(
+                {ok, #{result => fresh}},
+                hayata_agent:get_result(Agent)
+            ),
+
+            ?assertEqual(
+                #{result => fresh},
+                hayata_agent:get_state(Agent)
+            ),
+
+            FirstExecutionPid ! continue,
+            timer:sleep(50),
+
+            ?assertEqual(
+                completed,
+                maps:get(status, hayata_agent:get_info(Agent))
+            ),
+
+            ?assertEqual(
+                {ok, #{result => fresh}},
+                hayata_agent:get_result(Agent)
+            )
+        end)
+    after
+        persistent_term:erase(NodeKey)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
