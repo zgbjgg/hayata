@@ -1638,6 +1638,47 @@ duplicate_edge_down_preserves_execution_test() ->
         )
     end).
 
+edge_failure_result_and_down_are_deduplicated_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = execution_edge_failure_deduplication,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                {error, expected_failure}
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        await_execution_completed(Node, ExecutionId, 200),
+        await_edge_failure_termination(
+            Node,
+            edge_01,
+            ExecutionId,
+            200
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(#{}, maps:get(results, Execution)),
+        ?assertEqual(
+            #{edge_01 => expected_failure},
+            maps:get(errors, Execution)
+        ),
+        ?assertEqual([], maps:get(pending_edges, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
