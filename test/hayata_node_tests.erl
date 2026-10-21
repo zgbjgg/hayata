@@ -1879,6 +1879,56 @@ repeated_reducer_failure_notifies_recipient_test() ->
         end
     end).
 
+cancel_execution_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, execution_cancel},
+            hayata_node:start_execution(
+                Node,
+                execution_cancel,
+                EdgeTasks,
+                5000
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        Info = hayata_node:get_info(Node),
+        ActiveReducers = maps:get(active_reducers, Info),
+        #{pid := ReducerPid} = maps:get(execution_cancel, ActiveReducers),
+
+        ?assertEqual(
+            ok,
+            hayata_node:cancel_execution(Node, execution_cancel)
+        ),
+
+        ?assertNot(is_process_alive(EdgePid)),
+        ?assertNot(is_process_alive(ReducerPid)),
+
+        FinalInfo = hayata_node:get_info(Node),
+        Executions = maps:get(executions, FinalInfo),
+        Execution = maps:get(execution_cancel, Executions),
+
+        ?assertEqual(cancelled, maps:get(status, Execution)),
+        ?assertEqual(0, map_size(maps:get(active_edges, FinalInfo))),
+        ?assertEqual(0, map_size(maps:get(active_reducers, FinalInfo)))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
