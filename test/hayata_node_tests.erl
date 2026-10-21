@@ -2111,6 +2111,57 @@ cancel_already_cancelled_execution_test() ->
         ?assertEqual(cancelled, maps:get(status, Execution))
     end).
 
+cancel_execution_notifies_recipient_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+        ExecutionId = execution_cancel_notification,
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                Parent ! {edge_started, self()},
+                receive
+                    continue -> {ok, result_01}
+                end
+            end}
+        ],
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                5000,
+                Parent
+            )
+        ),
+
+        EdgePid = receive
+            {edge_started, Pid} -> Pid
+        after 1000 ->
+            error(edge_start_timeout)
+        end,
+
+        ?assertEqual(
+            ok,
+            hayata_node:cancel_execution(Node, ExecutionId)
+        ),
+
+        ?assertNot(is_process_alive(EdgePid)),
+
+        receive
+            {
+                hayata_node_execution,
+                think_01,
+                ExecutionId,
+                FinalResult
+            } ->
+                ?assertEqual(cancelled, maps:get(status, FinalResult))
+        after 1000 ->
+            error(cancellation_notification_timeout)
+        end
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
