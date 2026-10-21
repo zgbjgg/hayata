@@ -550,6 +550,13 @@ duplicate_edge_result_preserves_first_test() ->
                 {ok, duplicate_result}
             },
 
+            Node ! {
+                hayata_edge_result,
+                edge_01,
+                execution_duplicate_result,
+                {error, contradictory_failure}
+            },
+
             %% get_info is processed after both messages,
             %% sent to this process to the same node
             Info = hayata_node:get_info(Node),
