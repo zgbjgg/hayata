@@ -2,6 +2,7 @@
 
 [![Hex.pm](https://img.shields.io/hexpm/v/hayata.svg)](https://hex.pm/packages/hayata)
 [![Build Status](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml/badge.svg)](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml)
+[![Codecov](https://img.shields.io/codecov/c/github/zgbjgg/hayata.svg)](https://codecov.io/gh/zgbjgg/hayata)
 [![License: MIT](https://img.shields.io/github/license/zgbjgg/hayata.svg)](https://raw.githubusercontent.com/zgbjgg/hayata/master/LICENSE)
 [![Hex.pm](https://img.shields.io/hexpm/dt/hayata.svg)](https://hex.pm/packages/hayata)
 [![Hex.pm](https://img.shields.io/hexpm/dw/hayata.svg)](https://hex.pm/packages/hayata)
