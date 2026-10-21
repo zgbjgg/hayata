@@ -202,4 +202,4 @@ Hayata is under active development. The graph-based agent runtime, node/edge/red
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE) for details.
+Apache-2.0. See [LICENSE.md](LICENSE) for details.
