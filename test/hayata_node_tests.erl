@@ -851,6 +851,81 @@ terminal_execution_preserves_timeout_test() ->
         )
     end).
 
+
+reducer_recovery_preserves_edge_errors_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        Parent = self(),
+
+        EdgeTasks = [
+            {edge_01, fun() ->
+                {error, expected_failure}
+            end},
+            {edge_02, fun() ->
+                Parent ! {second_edge_started, self()},
+                receive
+                    continue -> {ok, second_result}
+                end
+            end}
+        ],
+
+        ExecutionId = execution_recovery_preserves_error,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            5000
+        ),
+
+        await_execution_error(
+            Node,
+            ExecutionId,
+            edge_01,
+            100
+        ),
+
+        InfoBefore = hayata_node:get_info(Node),
+        ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+        #{pid := OriginalReducer} = maps:get(
+            ExecutionId,
+            ActiveReducersBefore
+        ),
+
+        exit(OriginalReducer, kill),
+
+        _ReplacementReducer = await_replacement_reducer(
+            Node,
+            ExecutionId,
+            OriginalReducer,
+            100
+        ),
+
+        SecondEdgePid = receive
+            {second_edge_started, Pid} -> Pid
+        after 1000 ->
+            error(second_edge_start_timeout)
+        end,
+
+        SecondEdgePid ! continue,
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        InfoAfter = hayata_node:get_info(Node),
+        Executions = maps:get(executions, InfoAfter),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(completed, maps:get(status, Execution)),
+        ?assertEqual(
+            #{edge_02 => {ok, second_result}},
+            maps:get(results, Execution)
+        ),
+        ?assertEqual(
+            #{edge_01 => expected_failure},
+            maps:get(errors, Execution)
+        ),
+        ?assertEqual([], maps:get(pending_edges, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
