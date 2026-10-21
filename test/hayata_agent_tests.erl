@@ -188,6 +188,18 @@ execution_timeout_cancels_node_test() ->
                 hayata_agent:get_result(Agent)
             ),
 
+            Info = hayata_agent:get_info(Agent),
+
+            ?assertEqual(
+                {error, timeout},
+                maps:get(status, Info)
+            ),
+
+            ?assertEqual(
+                undefined,
+                maps:get(active_execution, Info)
+            ),
+
             ?assertNot(is_process_alive(NodeExecutionPid))
         after
             NodeExecutionPid ! continue
