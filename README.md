@@ -13,11 +13,12 @@ The runtime uses OTP processes, monitoring, and message passing to coordinate ag
 - **Reducer** — a temporary process that collects edge results for an execution and produces a consolidated outcome.
 - **Node supervisor** — supervises node processes and restarts them after abnormal termination.
 
+
 ## How to use Hayata
 
-The following example mirrors the basic LangGraph pattern: define a node, define the control flow, compile the graph, and invoke it with input. In Hayata's current API, the equivalent is to define a node function and a `decision_policy`, then start the agent's supervision tree.
+The following example demonstrates Hayata's graph-based agent API: define a node, define the control flow, start the agent's supervision tree, and invoke it asynchronously.
 
-This example uses a mock node that adds a greeting to the state; it does not call an LLM.
+This example uses a mock node; it does not call an LLM.
 
 ```erlang
 %% hello_hayata.erl
@@ -28,17 +29,18 @@ This example uses a mock node that adds a greeting to the state; it does not cal
 run() ->
     AgentId = hello_agent,
 
-    %% 1. Define a node function. It receives the current state.
+    %% 1. Define a node function.
     MockLlm = fun(State) ->
         Message = maps:get(input, State, <<"Hola">>),
-        #{messages => [
-            #{role => ai, content => <<"¡Hola mundo!">>},
-            #{role => user, content => Message}
-        ]}
+        #{
+            messages => [
+                #{role => ai, content => <<"¡Hola mundo!">>},
+                #{role => user, content => Message}
+            ]
+        }
     end,
 
     %% 2. Define the node catalog and control flow.
-    %% First visit the mock_llm node; on the next policy evaluation, finish.
     Nodes = #{mock_llm => MockLlm},
     DecisionPolicy = fun(Context) ->
         case maps:get(step, Context) of
@@ -48,7 +50,7 @@ run() ->
                 {finish, maps:get(state, Context)}
         end
     end,
-    
+
     Config = #{
         id => AgentId,
         state => #{},
@@ -58,46 +60,66 @@ run() ->
         execution_timeout => 5000
     },
 
-    %% 3. Start the supervision tree and get the agent process.
+    %% 3. Start the agent supervision tree.
     {ok, SupPid} = hayata_agent_sup:start_link(Config),
     {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
 
     try
-        %% 4. Invoke the agent with input.
-        {ok, _InvocationId} = hayata_agent:run(
+        %% 4. Invoke the agent and subscribe to its result.
+        case hayata_agent:run(
             AgentPid,
-            #{input => <<"Hola">>}
-        ),
-
-        %% 5. Wait for the asynchronous invocation to finish.
-        Result = await_result(AgentPid, 100),
-        Result
+            #{input => <<"Hola">>},
+            self()
+        ) of
+            {ok, InvocationId} ->
+                await_result(InvocationId, 100);
+            {error, Reason} ->
+                {error, Reason}
+        end
     after
-        %% Stop the agent and its supervised processes.
         ok = hayata_agent:stop(AgentPid)
     end.
 
-await_result(_AgentPid, 0) ->
-    {error, timeout};
-await_result(AgentPid, Attempts) ->
-    case hayata_agent:get_result(AgentPid) of
-        {error, no_result} ->
-            timer:sleep(10),
-            await_result(AgentPid, Attempts - 1);
-        Result ->
-            Result
+await_result(_InvocationId, 0) ->
+    {error, notification_timeout};
+await_result(InvocationId, Attempts) ->
+    receive
+        {hayata_agent_result, InvocationId, {ok, Result}} ->
+            {ok, Result};
+        {hayata_agent_result, InvocationId, {error, Reason}} ->
+            {error, Reason}
+    after 100 ->
+        await_result(InvocationId, Attempts - 1)
     end.
 ```
 
-Save the module as `hello_hayata.erl` in a location included in your Erlang code path, then run it from an Erlang shell after compiling the Hayata application and ensuring its beams are available:
+Save the module as `hello_hayata.erl` in a location included in your Erlang code path. After compiling Hayata and ensuring its beams are available, run it from an Erlang shell:
 
 ```erlang
 hello_hayata:run().
 ```
 
-The invocation is asynchronous: `hayata_agent:run/2` returns an invocation ID, while `hayata_agent:get_result/1` returns the final result after the agent completes. The decision policy controls the flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
+### Invocation API
 
-Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current agent API; it does not claim feature-for-feature API parity.
+Hayata supports two invocation APIs:
+
+- `hayata_agent:run(AgentPid, Input)` starts an asynchronous invocation and returns `{ok, InvocationId}`. Retrieve the result later using `hayata_agent:get_result/1`.
+- `hayata_agent:run(AgentPid, Input, SubscriptionPid)` starts an asynchronous invocation and sends the terminal result to the subscription process.
+
+The subscription receives one of these messages:
+
+```erlang
+{hayata_agent_result, InvocationId, {ok, Result}}
+{hayata_agent_result, InvocationId, {error, Reason}}
+```
+
+The `InvocationId` correlates the message with its invocation. Success, execution errors, and timeouts are reported through this message format. If an invocation is rejected before starting, for example because the agent is already running, `run/3` returns an error without sending a terminal-result notification for that rejected request.
+
+The subscription argument must be a PID; otherwise, `run/3` returns `{error, invalid_subscription_pid}`.
+
+The decision policy controls execution flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
+
+Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current API and does not claim feature-for-feature API parity.
 
 ## Execution lifecycle
 
