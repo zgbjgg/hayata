@@ -692,6 +692,36 @@ recovers_after_policy_failure_test() ->
         persistent_term:erase(FailureKey)
     end.
 
+supervisor_restarts_killed_node_test() ->
+    AgentId = make_ref(),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                #{result => ok}
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {finish, ok}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(_Agent) ->
+        FirstNodePid = hayata_node:whereis(AgentId, work),
+        ?assert(is_pid(FirstNodePid)),
+
+        exit(FirstNodePid, kill),
+
+        SecondNodePid = await_new_node(AgentId, work, FirstNodePid, 100),
+
+        ?assert(is_pid(SecondNodePid)),
+        ?assertNotEqual(FirstNodePid, SecondNodePid),
+        ?assertNot(is_process_alive(FirstNodePid))
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -726,4 +756,20 @@ await_status(Agent, Status, Attempts) ->
         _ ->
             timer:sleep(10),
             await_status(Agent, Status, Attempts - 1)
+    end.
+
+await_new_node(_AgentId, _NodeId, _OldPid, 0) ->
+    error(node_restart_timeout);
+await_new_node(AgentId, NodeId, OldPid, Attempts) ->
+    case hayata_node:whereis(AgentId, NodeId) of
+        NewPid when is_pid(NewPid), NewPid =/= OldPid ->
+            NewPid;
+        _ ->
+            timer:sleep(10),
+            await_new_node(
+                AgentId,
+                NodeId,
+                OldPid,
+                Attempts - 1
+            )
     end.
