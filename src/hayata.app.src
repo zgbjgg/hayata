@@ -7,7 +7,8 @@
     {mod, {hayata_app, []}},
     {applications, [
         kernel,
-        stdlib
+        stdlib,
+        telemetry
     ]},
     {env, []},
     {modules, []},
