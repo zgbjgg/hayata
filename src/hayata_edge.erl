@@ -172,7 +172,7 @@ code_change(_OldVersion, State, _Extra) ->
     map(),
     map()
 ) -> ok.
-emit_terminal_event({error, {exception, Class, Reason, _Stacktrace}}, Measurements, Metadata) ->
+emit_terminal_event({error, {exception, Class, _Reason, _Stacktrace}}, Measurements, Metadata) ->
     telemetry:execute(
         [hayata, edge, exception],
         Measurements,
