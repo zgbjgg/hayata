@@ -39,7 +39,8 @@
     result = undefined,
     last_error = undefined,
     execution_timeout = 30000,
-    timeout_ref = undefined
+    timeout_ref = undefined,
+    invocation_start_time = undefined
 }).
 
 -type config() :: #{
@@ -131,6 +132,7 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
     case prepare_invocation(State) of
         ok ->
             InvocationId = make_ref(),
+            InvocationStartTime = erlang:monotonic_time(),
             TimeoutRef = erlang:send_after(
                 State#agent_state.execution_timeout,
                 self(),
@@ -146,8 +148,10 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
                 active_execution = undefined,
                 result = undefined,
                 last_error = undefined,
-                timeout_ref = TimeoutRef
+                timeout_ref = TimeoutRef,
+                invocation_start_time = InvocationStartTime
             },
+            telemetry_start(State#agent_state.id, InvocationId),
             case evaluate_policy(NewState) of
                 {ok, UpdatedState} ->
                     {reply, {ok, InvocationId}, UpdatedState};
@@ -362,6 +366,12 @@ evaluate_policy(State) ->
                 last_error = undefined,
                 active_execution = undefined
             },
+            telemetry_stop(
+                CompletedState#agent_state.id,
+                CompletedState#agent_state.invocation_id,
+                CompletedState#agent_state.invocation_start_time,
+                Result
+            ),
             {ok, notify_invocation_result(CompletedState, {ok, Result})};
         {error, Reason} ->
             {error, Reason, fail_invocation(Reason, State)};
@@ -474,6 +484,12 @@ fail_invocation(Reason, State) ->
         last_error = Reason,
         active_execution = undefined
     },
+    telemetry_exception(
+        FailedState#agent_state.id,
+        FailedState#agent_state.invocation_id,
+        FailedState#agent_state.invocation_start_time,
+        Reason
+    ),
     notify_invocation_result(FailedState, {error, Reason}).
 
 -spec default_decision_policy(map()) -> {finish, term()}.
@@ -518,3 +534,48 @@ notify_invocation_result(#agent_state{invocation_id = InvocationId, subscription
     State#agent_state{subscription_pid = undefined};
 notify_invocation_result(State, _Outcome) ->
     State.
+
+
+-spec telemetry_start(term(), reference()) -> ok.
+telemetry_start(AgentId, InvocationId) ->
+    telemetry:execute(
+        [hayata, agent, invocation, start],
+        #{system_time => erlang:system_time()},
+        #{
+            agent_id => AgentId,
+            invocation_id => InvocationId
+        }
+    ).
+
+-spec telemetry_stop(term(), reference(), integer(), term()) -> ok.
+telemetry_stop(AgentId, InvocationId, StartTime, Result) ->
+    telemetry:execute(
+        [hayata, agent, invocation, stop],
+        #{
+            duration => erlang:monotonic_time() - StartTime
+        },
+        #{
+            agent_id => AgentId,
+            invocation_id => InvocationId,
+            result => Result
+        }
+    ).
+
+-spec telemetry_exception(
+    term(),
+    reference(),
+    integer(),
+    term()
+) -> ok.
+telemetry_exception(AgentId, InvocationId, StartTime, Reason) ->
+    telemetry:execute(
+        [hayata, agent, invocation, exception],
+        #{
+            duration => erlang:monotonic_time() - StartTime
+        },
+        #{
+            agent_id => AgentId,
+            invocation_id => InvocationId,
+            reason => Reason
+        }
+    ).

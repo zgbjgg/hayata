@@ -24,7 +24,8 @@
     errors = #{},
     timeout_ms,
     timeout_ref = undefined,
-    activated = false
+    activated = false,
+    started_at = undefined
 }).
 
 -type edge_id() :: term().
@@ -74,6 +75,7 @@ init(Config) ->
 -spec handle_call(term(), gen_server:from(), #reducer_state{}) ->
     {reply, {error, unsupported_request}, #reducer_state{}}.
 handle_call(activate, _From, State = #reducer_state{execution_id = ExecutionId, activated = false, timeout_ms = TimeoutMs}) ->
+    StartedAt = erlang:monotonic_time(),
     TimeoutRef = erlang:send_after(
         TimeoutMs,
         self(),
@@ -81,8 +83,14 @@ handle_call(activate, _From, State = #reducer_state{execution_id = ExecutionId, 
     ),
     NewState = State#reducer_state{
         activated = true,
-        timeout_ref = TimeoutRef
+        timeout_ref = TimeoutRef,
+        started_at = StartedAt
     },
+    telemetry:execute(
+        [hayata, reducer, start],
+        #{system_time => erlang:system_time()},
+        #{execution_id => State#reducer_state.execution_id}
+    ),
     self() ! {hayata_reducer_evaluate, ExecutionId},
     {reply, ok, NewState};
 handle_call(activate, _From, State) ->
@@ -111,6 +119,7 @@ handle_info({reducer_timeout, ExecutionId}, State = #reducer_state{execution_id 
 handle_info({hayata_reducer_evaluate, ExecutionId}, State = #reducer_state{execution_id = ExecutionId, activated = true}) ->
     evaluate_completion(State);
 handle_info({hayata_reducer_activate, ExecutionId}, State = #reducer_state{execution_id = ExecutionId, activated = false, timeout_ms = TimeoutMs}) ->
+    StartedAt = erlang:monotonic_time(),
     TimeoutRef = erlang:send_after(
         TimeoutMs,
         self(),
@@ -118,8 +127,14 @@ handle_info({hayata_reducer_activate, ExecutionId}, State = #reducer_state{execu
     ),
     NewState = State#reducer_state{
         activated = true,
-        timeout_ref = TimeoutRef
+        timeout_ref = TimeoutRef,
+        started_at = StartedAt
     },
+    telemetry:execute(
+        [hayata, reducer, start],
+        #{system_time => erlang:system_time()},
+        #{execution_id => State#reducer_state.execution_id}
+    ),
     evaluate_completion(NewState);
 handle_info(_Info, State) ->
     {noreply, State}.
@@ -242,6 +257,20 @@ finish(Status, State) ->
         errors => State#reducer_state.errors,
         pending_edges => PendingEdges
     },
+    telemetry:execute(
+        [hayata, reducer, stop],
+        #{
+           duration => erlang:monotonic_time() - State#reducer_state.started_at
+        },
+        #{
+            execution_id => State#reducer_state.execution_id,
+            status => Status,
+            expected_edges => length(State#reducer_state.expected_edges),
+            result_count => map_size(State#reducer_state.results),
+            error_count => map_size(State#reducer_state.errors),
+            pending_edges => length(PendingEdges)
+        }
+    ),
     State#reducer_state.node_pid !
         {
             hayata_reducer_result,

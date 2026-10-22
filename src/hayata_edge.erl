@@ -22,7 +22,8 @@
     reducer_pid = undefined,
     edge_id,
     execution_id,
-    task
+    task,
+    started_at = undefined
 }).
 
 -type edge_id() :: term().
@@ -87,8 +88,19 @@ handle_call(_Request, _From, State) ->
 -spec handle_cast(term(), #edge_state{}) ->
     {noreply, #edge_state{}}.
 handle_cast(start, State) ->
+    StartedAt = erlang:monotonic_time(),
+    StartedState = State#edge_state{started_at = StartedAt},
+    telemetry:execute(
+        [hayata, edge, start],
+        #{system_time => erlang:system_time()},
+        #{
+            edge_id => StartedState#edge_state.edge_id,
+            execution_id => StartedState#edge_state.execution_id
+        }
+    ),
+
     Result = try
-        (State#edge_state.task)()
+        (StartedState#edge_state.task)()
     catch
         Class:Reason:Stacktrace ->
             {error, {exception, Class, Reason, Stacktrace}}
@@ -102,28 +114,36 @@ handle_cast(start, State) ->
             {{error, ErrorReason}, {edge_failed, ErrorReason}}
     end,
 
-    ok = case State#edge_state.reducer_pid of
+    Duration = erlang:monotonic_time() - StartedState#edge_state.started_at,
+    Measurements = #{duration => Duration},
+    Metadata = #{
+        edge_id => StartedState#edge_state.edge_id,
+        execution_id => StartedState#edge_state.execution_id
+    },
+    emit_terminal_event(Message, Measurements, Metadata),
+
+    ok = case StartedState#edge_state.reducer_pid of
         undefined ->
             ok;
 
         ReducerPid ->
             ReducerPid ! {
                 hayata_reducer_edge_result,
-                State#edge_state.edge_id,
-                State#edge_state.execution_id,
+                StartedState#edge_state.edge_id,
+                StartedState#edge_state.execution_id,
                 Message
             },
             ok
     end,
 
-    State#edge_state.node_pid ! {
+    StartedState#edge_state.node_pid ! {
         hayata_edge_result,
-        State#edge_state.edge_id,
-        State#edge_state.execution_id,
+        StartedState#edge_state.edge_id,
+        StartedState#edge_state.execution_id,
         Message
     },
 
-    {stop, StopReason, State};
+    {stop, StopReason, StartedState};
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -145,3 +165,25 @@ code_change(_OldVersion, State, _Extra) ->
     {ok, State}.
 
 %% Internal functions
+
+
+-spec emit_terminal_event(
+    term(),
+    map(),
+    map()
+) -> ok.
+emit_terminal_event({error, {exception, Class, Reason, _Stacktrace}}, Measurements, Metadata) ->
+    telemetry:execute(
+        [hayata, edge, exception],
+        Measurements,
+        Metadata#{
+            class => Class,
+            reason => Reason
+        }
+    );
+emit_terminal_event(_Result, Measurements, Metadata) ->
+    telemetry:execute(
+        [hayata, edge, stop],
+        Measurements,
+        Metadata
+    ).

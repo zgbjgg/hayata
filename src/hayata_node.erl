@@ -467,7 +467,8 @@ start_execution_reducer(
         timeout_ms => TimeoutMs,
         deadline => erlang:monotonic_time(millisecond) + TimeoutMs,
         results => #{},
-        errors => #{}
+        errors => #{},
+        started_at => erlang:monotonic_time()
     },
     Executions = maps:put(
         ExecutionId,
@@ -478,6 +479,15 @@ start_execution_reducer(
         active_reducers = ActiveReducers,
         executions = Executions
     },
+    telemetry:execute(
+        [hayata, node, execution, start],
+        #{system_time => erlang:system_time()},
+        #{
+            agent_id => State#node_state.agent_id,
+            node_id => State#node_state.node_id,
+            execution_id => ExecutionId
+        }
+    ),
 
     case activate_execution_reducer(ReducerPid) of
         ok ->
@@ -489,6 +499,14 @@ start_execution_reducer(
 
             );
         {error, Reason} ->
+            Execution = maps:get(
+                ExecutionId,
+                NewState#node_state.executions
+            ),
+            FailedExecution = Execution#{
+                status => {reducer_recovery_failed, {activation_failed, Reason}}
+            },
+            emit_execution_terminal(FailedExecution, State),
             erlang:demonitor(MonitorRef, [flush]),
             {reply, {error, {reducer_activation_failed, Reason}}, State}
     end.
@@ -711,6 +729,7 @@ complete_execution_result(ExecutionId, Execution, FinalResult, State) ->
         errors => FinalErrors,
         pending_edges => maps:get(pending_edges, FinalResult, [])
     },
+    emit_execution_terminal(UpdatedExecution, State),
     NewState = save_execution(UpdatedExecution, State),
     notify_execution_recipient(
         ExecutionId,
@@ -891,6 +910,7 @@ mark_reducer_recovery_failed(ExecutionId, Reason, State) ->
                     UpdatedExecution = Execution#{
                         status => {reducer_recovery_failed, Reason}
                     },
+                    emit_execution_terminal(UpdatedExecution, State),
                     NewState = save_execution(UpdatedExecution, State),
                     notify_execution_recipient(
                         ExecutionId,
@@ -1167,6 +1187,7 @@ cancel_active_execution(ExecutionId, Execution, State) ->
         ExecutionId,
         ReducerState
     ),
+    emit_execution_terminal(UpdatedExecution, State),
     notify_execution_recipient(
         ExecutionId,
         UpdatedExecution,
@@ -1229,3 +1250,35 @@ stop_process(Pid) ->
         false ->
             ok
     end.
+
+-spec emit_execution_terminal(map(), #node_state{}) -> ok.
+emit_execution_terminal(Execution, State) ->
+    Status = maps:get(status, Execution),
+    StartedAt = maps:get(started_at, Execution),
+    Duration = erlang:monotonic_time() - StartedAt,
+    Measurements = #{duration => Duration},
+    Metadata = #{
+        agent_id => State#node_state.agent_id,
+        node_id => State#node_state.node_id,
+        execution_id => maps:get(execution_id, Execution),
+        status => Status
+    },
+    emit_execution_terminal_event(Status, Measurements, Metadata).
+
+-spec emit_execution_terminal_event(
+    term(),
+    map(),
+    map()
+) -> ok.
+emit_execution_terminal_event({reducer_recovery_failed, _Reason},Measurements, Metadata) ->
+    telemetry:execute(
+        [hayata, node, execution, exception],
+        Measurements,
+        Metadata
+    );
+emit_execution_terminal_event(_Status, Measurements, Metadata) ->
+    telemetry:execute(
+        [hayata, node, execution, stop],
+        Measurements,
+        Metadata
+    ).

@@ -1212,7 +1212,7 @@ execution_timeout_cannot_interrupt_blocked_policy_test() ->
     },
 
     with_agent(Config, fun(Agent) ->
-        Caller = spawn(fun() ->
+        _Caller = spawn(fun() ->
             Result = hayata_agent:run(Agent, hello),
             Parent ! {run_result, Result}
         end),
@@ -1249,6 +1249,91 @@ execution_timeout_cannot_interrupt_blocked_policy_test() ->
             maps:get(status, hayata_agent:get_info(Agent))
         )
     end).
+
+telemetry_emits_start_and_stop_for_successful_invocation_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        with_agent(Config, fun(Agent) ->
+            {ok, InvocationId} = hayata_agent:run(Agent, hello),
+
+            Events = hayata_test_telemetry:events(),
+            AgentId = maps:get(id, Config),
+
+            ?debugFmt("Telemetry events:~n~p~n", [Events]),
+
+            ?assertMatch(
+                [
+                    {hayata_telemetry_event,
+                     [hayata, agent, invocation, start],
+                     _StartMeasurements,
+                     #{agent_id := AgentId, invocation_id := InvocationId}},
+                    {hayata_telemetry_event,
+                     [hayata, agent, invocation, stop],
+                     #{duration := Duration},
+                     #{agent_id := AgentId,
+                       invocation_id := InvocationId,
+                       result := #{answer := 42}}}
+                ] when is_integer(Duration),
+                Events
+            )
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_exception_for_failed_invocation_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(_Context) ->
+            {error, test_failure}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        with_agent(Config, fun(Agent) ->
+            ?assertEqual(
+                {error, test_failure},
+                hayata_agent:run(Agent, hello)
+            ),
+
+            Events = hayata_test_telemetry:events(),
+            AgentId = maps:get(id, Config),
+
+            ?assertMatch(
+                [
+                    {hayata_telemetry_event,
+                     [hayata, agent, invocation, start],
+                     _StartMeasurements,
+                     #{agent_id := AgentId, invocation_id := _InvocationId}},
+                    {hayata_telemetry_event,
+                     [hayata, agent, invocation, exception],
+                     #{duration := Duration},
+                     #{agent_id := AgentId, reason := test_failure}}
+                ] when is_integer(Duration),
+                Events
+            )
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
 
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
