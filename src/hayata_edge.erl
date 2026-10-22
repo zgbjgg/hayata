@@ -177,8 +177,7 @@ emit_terminal_event({error, {exception, Class, Reason, _Stacktrace}}, Measuremen
         [hayata, edge, exception],
         Measurements,
         Metadata#{
-            class => Class,
-            reason => Reason
+            class => Class
         }
     );
 emit_terminal_event(_Result, Measurements, Metadata) ->

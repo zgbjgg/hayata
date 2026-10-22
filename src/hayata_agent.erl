@@ -369,8 +369,7 @@ evaluate_policy(State) ->
             telemetry_stop(
                 CompletedState#agent_state.id,
                 CompletedState#agent_state.invocation_id,
-                CompletedState#agent_state.invocation_start_time,
-                Result
+                CompletedState#agent_state.invocation_start_time
             ),
             {ok, notify_invocation_result(CompletedState, {ok, Result})};
         {error, Reason} ->
@@ -381,7 +380,8 @@ evaluate_policy(State) ->
     catch
         Class:Reason:Stacktrace ->
             Error = {policy_exception, Class, Reason, Stacktrace},
-            {error, Error, fail_invocation(Error, State)}
+            FailedState = fail_invocation_exception(Class, Error, State),
+            {error, Error, FailedState}
     end.
 
 -spec start_next_node(term(), term(), #agent_state{}) ->
@@ -475,22 +475,57 @@ apply_node_result(FinalResult, State) ->
             {error, {node_execution_failed, Status}, State}
     end.
 
+
 -spec fail_invocation(term(), #agent_state{}) -> #agent_state{}.
 fail_invocation(Reason, State) ->
-    CancelledState = cancel_invocation_timeout(State),
-    FailedState = CancelledState#agent_state{
-        status = {error, Reason},
-        result = undefined,
-        last_error = Reason,
-        active_execution = undefined
-    },
+    fail_invocation_terminal(Reason, State, failed).
+
+-spec fail_invocation_exception(
+    term(),
+    term(),
+    #agent_state{}
+) -> #agent_state{}.
+fail_invocation_exception(Class, Reason, State) ->
+    FailedState = fail_invocation_state(Reason, State),
     telemetry_exception(
         FailedState#agent_state.id,
         FailedState#agent_state.invocation_id,
         FailedState#agent_state.invocation_start_time,
-        Reason
+        Class
     ),
     notify_invocation_result(FailedState, {error, Reason}).
+
+-spec fail_invocation_terminal(
+    term(),
+    #agent_state{},
+    failed
+) -> #agent_state{}.
+fail_invocation_terminal(Reason, State, failed) ->
+    FailedState = fail_invocation_state(Reason, State),
+    telemetry:execute(
+        [hayata, agent, invocation, stop],
+        #{
+            duration =>
+                erlang:monotonic_time() -
+                FailedState#agent_state.invocation_start_time
+        },
+        #{
+            agent_id => FailedState#agent_state.id,
+            invocation_id => FailedState#agent_state.invocation_id,
+            status => failed
+        }
+    ),
+    notify_invocation_result(FailedState, {error, Reason}).
+
+-spec fail_invocation_state(term(), #agent_state{}) -> #agent_state{}.
+fail_invocation_state(Reason, State) ->
+    CancelledState = cancel_invocation_timeout(State),
+    CancelledState#agent_state{
+        status = {error, Reason},
+        result = undefined,
+        last_error = Reason,
+        active_execution = undefined
+    }.
 
 -spec default_decision_policy(map()) -> {finish, term()}.
 default_decision_policy(Context) ->
@@ -547,8 +582,8 @@ telemetry_start(AgentId, InvocationId) ->
         }
     ).
 
--spec telemetry_stop(term(), reference(), integer(), term()) -> ok.
-telemetry_stop(AgentId, InvocationId, StartTime, Result) ->
+-spec telemetry_stop(term(), reference(), integer()) -> ok.
+telemetry_stop(AgentId, InvocationId, StartTime) ->
     telemetry:execute(
         [hayata, agent, invocation, stop],
         #{
@@ -557,7 +592,7 @@ telemetry_stop(AgentId, InvocationId, StartTime, Result) ->
         #{
             agent_id => AgentId,
             invocation_id => InvocationId,
-            result => Result
+            status => completed
         }
     ).
 
@@ -567,7 +602,7 @@ telemetry_stop(AgentId, InvocationId, StartTime, Result) ->
     integer(),
     term()
 ) -> ok.
-telemetry_exception(AgentId, InvocationId, StartTime, Reason) ->
+telemetry_exception(AgentId, InvocationId, StartTime, Class) ->
     telemetry:execute(
         [hayata, agent, invocation, exception],
         #{
@@ -576,6 +611,6 @@ telemetry_exception(AgentId, InvocationId, StartTime, Reason) ->
         #{
             agent_id => AgentId,
             invocation_id => InvocationId,
-            reason => Reason
+            class => Class
         }
     ).

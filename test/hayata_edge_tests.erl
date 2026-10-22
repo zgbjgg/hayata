@@ -90,6 +90,210 @@ abrupt_termination_test() ->
     ?assertEqual(killed, receive_down(MonitorRef, EdgePid)),
     ?assertEqual(no_message, receive_optional_message()).
 
+telemetry_emits_start_and_stop_for_successful_execution_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        {ok, EdgePid} = hayata_edge:start(
+            self(),
+            edge_telemetry,
+            execution_telemetry,
+            fun() -> {ok, result_telemetry} end
+        ),
+
+        MonitorRef = erlang:monitor(process, EdgePid),
+        ok = hayata_edge:execute(EdgePid),
+
+        receive
+            {hayata_edge_result, edge_telemetry,
+                execution_telemetry, {ok, result_telemetry}} ->
+                ok
+        after 1000 ->
+            error(edge_result_timeout)
+        end,
+
+        receive
+            {'DOWN', MonitorRef, process, EdgePid, normal} ->
+                ok
+        after 1000 ->
+            error(edge_down_timeout)
+        end,
+
+        Events = hayata_test_telemetry:events(),
+
+        ?assertMatch(
+            [
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, start],
+                    #{system_time := _},
+                    #{
+                        edge_id := edge_telemetry,
+                        execution_id := execution_telemetry
+                    }
+                },
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, stop],
+                    #{duration := Duration},
+                    #{
+                        edge_id := edge_telemetry,
+                        execution_id := execution_telemetry
+                    }
+                }
+            ] when is_integer(Duration),
+            Events
+        )
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_stop_for_controlled_error_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        {ok, EdgePid} = hayata_edge:start(
+            self(),
+            edge_telemetry_error,
+            execution_telemetry_error,
+            fun() -> {error, task_failed} end
+        ),
+
+        MonitorRef = erlang:monitor(process, EdgePid),
+        ok = hayata_edge:execute(EdgePid),
+
+        receive
+            {
+                hayata_edge_result,
+                edge_telemetry_error,
+                execution_telemetry_error,
+                {error, task_failed}
+            } ->
+                ok
+        after 1000 ->
+            error(edge_result_timeout)
+        end,
+
+        receive
+            {
+                'DOWN',
+                MonitorRef,
+                process,
+                EdgePid,
+                {edge_failed, task_failed}
+            } ->
+                ok
+        after 1000 ->
+            error(edge_down_timeout)
+        end,
+
+        Events = hayata_test_telemetry:events(),
+
+        ?assertMatch(
+            [
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, start],
+                    #{system_time := _},
+                    #{
+                        edge_id := edge_telemetry_error,
+                        execution_id := execution_telemetry_error
+                    }
+                },
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, stop],
+                    #{duration := Duration},
+                    #{
+                        edge_id := edge_telemetry_error,
+                        execution_id := execution_telemetry_error
+                    }
+                }
+            ] when is_integer(Duration),
+            Events
+        )
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_exception_for_task_exception_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        {ok, EdgePid} = hayata_edge:start(
+            self(),
+            edge_telemetry_exception,
+            execution_telemetry_exception,
+            fun() -> erlang:error(task_crashed) end
+        ),
+
+        MonitorRef = erlang:monitor(process, EdgePid),
+        ok = hayata_edge:execute(EdgePid),
+
+        receive
+            {
+                hayata_edge_result,
+                edge_telemetry_exception,
+                execution_telemetry_exception,
+                {error, {exception, error, task_crashed, _Stacktrace}}
+            } ->
+                ok
+        after 1000 ->
+            error(edge_result_timeout)
+        end,
+
+        receive
+            {
+                'DOWN',
+                MonitorRef,
+                process,
+                EdgePid,
+                {edge_failed, {exception, error, task_crashed, _}}
+            } ->
+                ok
+        after 1000 ->
+            error(edge_down_timeout)
+        end,
+
+        Events = hayata_test_telemetry:events(),
+
+        ?assertMatch(
+            [
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, start],
+                    #{system_time := _},
+                    #{
+                        edge_id := edge_telemetry_exception,
+                        execution_id := execution_telemetry_exception
+                    }
+                },
+                {
+                    hayata_telemetry_event,
+                    [hayata, edge, exception],
+                    #{duration := Duration},
+                    #{
+                        edge_id := edge_telemetry_exception,
+                        execution_id := execution_telemetry_exception,
+                        class := error
+                    } = Metadata
+                }
+            ]
+            when is_integer(Duration),
+            Events
+        ),
+
+        [{hayata_telemetry_event, _, _, _},
+         {hayata_telemetry_event, _, _, Metadata}] = Events,
+        ?assertNot(maps:is_key(reason, Metadata)),
+        ?assertNot(maps:is_key(stacktrace, Metadata))
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
 receive_message() ->
     receive
         Message = {hayata_edge_result, _, _, _} ->

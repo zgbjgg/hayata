@@ -2229,6 +2229,280 @@ node_crash_terminates_active_edges_test() ->
         end
     end.
 
+telemetry_emits_start_and_stop_for_successful_execution_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    AgentId = make_ref(),
+    NodeId = telemetry_node,
+    ExecutionId = telemetry_execution,
+
+    try
+        with_node(AgentId, NodeId, think, #{}, [], fun(Node) ->
+            {ok, ExecutionId} = hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                [{edge_telemetry, fun() -> {ok, result} end}],
+                1000,
+                self()
+            ),
+
+            receive
+                {hayata_node_execution, NodeId, ExecutionId,
+                    #{status := completed}} ->
+                    ok
+            after 2000 ->
+                error(node_execution_timeout)
+            end,
+
+            Events = hayata_test_telemetry:events(),
+            NodeEvents = [
+                Event
+                || Event = {hayata_telemetry_event, _Name, _Measurements,
+                    #{agent_id := EventAgentId,
+                      node_id := EventNodeId,
+                      execution_id := EventExecutionId}} <- Events,
+                   EventAgentId =:= AgentId,
+                   EventNodeId =:= NodeId,
+                   EventExecutionId =:= ExecutionId
+            ],
+
+            ?assertMatch(
+                [
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, start],
+                        #{system_time := _},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId
+                        }
+                    },
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, stop],
+                        #{duration := Duration},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId,
+                            status := completed
+                        }
+                    }
+                ] when is_integer(Duration) andalso Duration >= 0,
+                NodeEvents
+            )
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_stop_for_cancelled_execution_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    AgentId = make_ref(),
+    NodeId = telemetry_cancel_node,
+    ExecutionId = telemetry_cancel_execution,
+    Parent = self(),
+
+    try
+        with_node(AgentId, NodeId, think, #{}, [], fun(Node) ->
+            Task = fun() ->
+                Parent ! {telemetry_task_started, self()},
+                receive
+                    continue -> {ok, result}
+                end
+            end,
+
+            {ok, ExecutionId} = hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                [{edge_telemetry, Task}],
+                5000,
+                self()
+            ),
+
+            receive
+                {telemetry_task_started, _Pid} -> ok
+            after 1000 ->
+                error(edge_start_timeout)
+            end,
+
+            ?assertEqual(
+                ok,
+                hayata_node:cancel_execution(Node, ExecutionId)
+            ),
+
+            Info = hayata_node:get_info(Node),
+            Execution = maps:get(
+                ExecutionId,
+                maps:get(executions, Info)
+            ),
+            ?assertEqual(cancelled, maps:get(status, Execution)),
+
+            Events = hayata_test_telemetry:events(),
+            NodeEvents = [
+                Event
+                || Event = {hayata_telemetry_event, _Name, _Measurements,
+                    #{agent_id := EventAgentId,
+                      node_id := EventNodeId,
+                      execution_id := EventExecutionId}} <- Events,
+                   EventAgentId =:= AgentId,
+                   EventNodeId =:= NodeId,
+                   EventExecutionId =:= ExecutionId
+            ],
+
+            ?assertMatch(
+                [
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, start],
+                        #{system_time := _},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId
+                        }
+                    },
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, stop],
+                        #{duration := Duration},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId,
+                            status := cancelled
+                        }
+                    }
+                ] when is_integer(Duration) andalso Duration >= 0,
+                NodeEvents
+            )
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_exception_for_reducer_recovery_failure_test() ->
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    AgentId = make_ref(),
+    NodeId = telemetry_recovery_node,
+    ExecutionId = telemetry_recovery_execution,
+    Parent = self(),
+
+    try
+        with_node(AgentId, NodeId, think, #{}, [], fun(Node) ->
+            EdgeTasks = [
+                {edge_01, fun() ->
+                    {ok, first_result}
+                end},
+                {edge_02, fun() ->
+                    Parent ! {telemetry_recovery_edge_started, self()},
+                    receive
+                        continue -> {ok, second_result}
+                    end
+                end}
+            ],
+
+            {ok, ExecutionId} = hayata_node:start_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                5000
+            ),
+
+            await_execution_result(Node, ExecutionId, edge_01, 100),
+
+            SecondEdgePid = receive
+                {telemetry_recovery_edge_started, Pid} -> Pid
+            after 1000 ->
+                error(second_edge_start_timeout)
+            end,
+
+            InfoBefore = hayata_node:get_info(Node),
+            ActiveReducersBefore = maps:get(active_reducers, InfoBefore),
+            #{pid := OriginalReducer} = maps:get(
+                ExecutionId,
+                ActiveReducersBefore
+            ),
+
+            exit(OriginalReducer, kill),
+
+            ReplacementReducer = await_replacement_reducer(
+                Node,
+                ExecutionId,
+                OriginalReducer,
+                100
+            ),
+
+            exit(ReplacementReducer, kill),
+
+            await_recovery_failed(Node, ExecutionId, 100),
+
+            InfoAfter = hayata_node:get_info(Node),
+            Executions = maps:get(executions, InfoAfter),
+            Execution = maps:get(ExecutionId, Executions),
+
+            ?assertMatch(
+                {reducer_recovery_failed, _},
+                maps:get(status, Execution)
+            ),
+
+            Events = hayata_test_telemetry:events(),
+            NodeEvents = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    _Name,
+                    _Measurements,
+                    #{
+                        agent_id := EventAgentId,
+                        node_id := EventNodeId,
+                        execution_id := EventExecutionId
+                    }
+                } <- Events,
+                EventAgentId =:= AgentId,
+                EventNodeId =:= NodeId,
+                EventExecutionId =:= ExecutionId
+            ],
+
+            ?assertMatch(
+                [
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, start],
+                        #{system_time := _},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId
+                        }
+                    },
+                    {
+                        hayata_telemetry_event,
+                        [hayata, node, execution, exception],
+                        #{duration := Duration},
+                        #{
+                            agent_id := AgentId,
+                            node_id := NodeId,
+                            execution_id := ExecutionId,
+                            status := {reducer_recovery_failed, _}
+                        }
+                    }
+                ] when is_integer(Duration) andalso Duration >= 0,
+                NodeEvents
+            ),
+
+            SecondEdgePid ! continue
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
