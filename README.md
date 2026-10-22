@@ -22,9 +22,9 @@ The runtime uses OTP processes, monitoring, and message passing to coordinate ag
 
 ## How to use Hayata
 
-The following example demonstrates Hayata's graph-based agent API: define a node, define the control flow, start the agent's supervision tree, and invoke it asynchronously.
+The following example mirrors the basic LangGraph pattern: define a node, define the control flow, compile the graph, and invoke it with input. In Hayata's current API, the equivalent is to define a node function and a `decision_policy`, then start the agent's supervision tree.
 
-This example uses a mock node; it does not call an LLM.
+This example uses a mock node that adds a greeting to the state; it does not call an LLM.
 
 ```erlang
 %% hello_hayata.erl
@@ -35,22 +35,22 @@ This example uses a mock node; it does not call an LLM.
 run() ->
     AgentId = hello_agent,
 
+    %% 1. Define a node function. It receives the current state.
     MockLlm = fun(State) ->
         Message = maps:get(input, State, <<"Hola">>),
-        #{
-            messages => [
-                #{role => ai, content => <<"¡Hola mundo!">>},
-                #{role => user, content => Message}
-            ]
-        }
+        #{messages => [
+            #{role => ai, content => <<"¡Hola mundo!">>},
+            #{role => user, content => Message}
+        ]}
     end,
 
+    %% 2. Define the node catalog and control flow.
+    %% First visit the mock_llm node; on the next policy evaluation, finish.
     Nodes = #{mock_llm => MockLlm},
-
     DecisionPolicy = fun(Context) ->
         case maps:get(step, Context) of
             0 ->
-                {next, mock_llm, <<"Hola">>};
+                {next, mock_llm, undefined};
             1 ->
                 {finish, maps:get(state, Context)}
         end
@@ -65,74 +65,47 @@ run() ->
         execution_timeout => 5000
     },
 
-    case hayata_sup:start_agent(Config) of
-        {ok, AgentSupPid} ->
-            try
-                run_agent(AgentSupPid)
-            after
-                hayata_sup:stop_agent(AgentSupPid)
-            end;
-        {error, Reason} ->
-            {error, {agent_start_failed, Reason}}
+    %% 3. Start the supervision tree and get the agent process.
+    {ok, SupPid} = hayata_agent_sup:start_link(Config),
+    {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
+
+    try
+        %% 4. Invoke the agent with input.
+        {ok, _InvocationId} = hayata_agent:run(
+            AgentPid,
+            #{input => <<"Hola">>}
+        ),
+
+        %% 5. Wait for the asynchronous invocation to finish.
+        Result = await_result(AgentPid, 100),
+        io:format("~p~n", [Result]),
+        Result
+    after
+        %% Stop the agent and its supervised processes.
+        ok = hayata_agent:stop(AgentPid)
     end.
 
-run_agent(AgentSupPid) ->
-    case hayata_agent_sup:agent(AgentSupPid) of
-        {ok, AgentPid} ->
-            case hayata_agent:run(
-                AgentPid,
-                #{input => <<"Hola">>},
-                self()
-            ) of
-                {ok, InvocationId} ->
-                    await_result(InvocationId, 100);
-                {error, Reason} ->
-                    {error, Reason}
-            end;
-        {error, Reason} ->
-            {error, Reason}
-    end.
-
-await_result(_InvocationId, 0) ->
-    {error, notification_timeout};
-await_result(InvocationId, Attempts) ->
-    receive
-        {hayata_agent_result, InvocationId, {ok, Result}} ->
-            {ok, Result};
-        {hayata_agent_result, InvocationId, {error, Reason}} ->
-            {error, Reason}
-    after 100 ->
-        await_result(InvocationId, Attempts - 1)
+await_result(_AgentPid, 0) ->
+    {error, timeout};
+await_result(AgentPid, Attempts) ->
+    case hayata_agent:get_result(AgentPid) of
+        {error, no_result} ->
+            timer:sleep(10),
+            await_result(AgentPid, Attempts - 1);
+        Result ->
+            Result
     end.
 ```
 
-Save the module as `hello_hayata.erl` in a location included in your Erlang code path. After compiling Hayata and ensuring its beams are available, run it from an Erlang shell:
+Save the module as `hello_hayata.erl` in a location included in your Erlang code path, then run it from an Erlang shell after compiling the Hayata application and ensuring its beams are available:
 
 ```erlang
 hello_hayata:run().
 ```
 
-### Invocation API
+The invocation is asynchronous: `hayata_agent:run/2` returns an invocation ID, while `hayata_agent:get_result/1` returns the final result after the agent completes. The decision policy controls the flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
 
-Hayata supports two invocation APIs:
-
-- `hayata_agent:run(AgentPid, Input)` starts an asynchronous invocation and returns `{ok, InvocationId}`. Retrieve the result later using `hayata_agent:get_result/1`.
-- `hayata_agent:run(AgentPid, Input, SubscriptionPid)` starts an asynchronous invocation and sends the terminal result to the subscription process.
-
-The subscription receives one of these messages:
-
-```erlang
-{hayata_agent_result, InvocationId, {ok, Result}}
-{hayata_agent_result, InvocationId, {error, Reason}}
-```
-
-The `InvocationId` correlates the message with its invocation. Success, execution errors, and timeouts are reported through this message format. If an invocation is rejected before starting, for example because the agent is already running, `run/3` returns an error without sending a terminal-result notification for that rejected request.
-
-The subscription argument must be a PID; otherwise, `run/3` returns `{error, invalid_subscription_pid}`.
-
-The decision policy controls execution flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
-
-Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current API and does not claim feature-for-feature API parity.
+Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current agent API; it does not claim feature-for-feature API parity.
 
 ## Execution lifecycle
 
@@ -145,6 +118,75 @@ Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current API 
 
 Logical edge IDs and execution IDs correlate messages. Stale notifications must not overwrite terminal execution state or trigger duplicate notifications.
 
+## Telemetry
+
+Hayata uses [Telemetry](https://hexdocs.pm/telemetry/) to expose lifecycle events from agents, nodes, edges, and reducers. Applications can attach handlers to collect metrics, trace execution activity, or integrate with monitoring systems.
+
+### Event conventions
+
+| Component | Event | Meaning |
+|---|---|---|
+| Agent | `[:hayata, :agent, :invocation, :start]` | An invocation starts. |
+| Agent | `[:hayata, :agent, :invocation, :stop]` | An invocation completes or fails normally. |
+| Agent | `[:hayata, :agent, :invocation, :exception]` | An invocation encounters a caught policy exception. |
+| Node | `[:hayata, :node, :execution, :start]` | A node execution starts. |
+| Node | `[:hayata, :node, :execution, :stop]` | A node execution reaches a terminal state, such as completion or cancellation. |
+| Node | `[:hayata, :node, :execution, :exception]` | A node execution ends with a reducer recovery failure. |
+| Edge | `[:hayata, :edge, :start]` | An edge task starts. |
+| Edge | `[:hayata, :edge, :stop]` | An edge task ends without a caught task exception. |
+| Edge | `[:hayata, :edge, :exception]` | An edge task raises a caught exception. |
+| Reducer | `[:hayata, :reducer, :start]` | A reducer is activated. |
+| Reducer | `[:hayata, :reducer, :stop]` | A reducer completes or times out. |
+
+A `stop` event indicates a terminal outcome, not necessarily success. Where present, use the `status` metadata to distinguish completed, failed, cancelled, and timed-out executions.
+
+### Measurements and metadata
+
+Start events include `system_time`. Terminal events include `duration`, calculated with `erlang:monotonic_time/0`. Both use Erlang native time units; convert durations when exporting to systems that expect milliseconds.
+
+Common metadata includes `agent_id`, `node_id`, `execution_id`, `edge_id`, `status`, and, for caught exceptions, `class`. Reducer events may also include `expected_edges`, `result_count`, `error_count`, and `pending_edges`. Available fields vary by event.
+
+Hayata's telemetry metadata avoids including full results, exception reasons, or stacktraces. Applications should also review their own handlers and exporters to avoid exposing sensitive inputs, state, prompts, or outputs.
+
+### Attaching a handler
+
+The following example subscribes to agent invocation events:
+
+```erlang
+-module(my_hayata_telemetry).
+
+-export([attach/0, detach/0, handle_event/4]).
+
+-define(HANDLER_ID, {?MODULE, agent_invocations}).
+
+attach() ->
+    telemetry:attach_many(
+        ?HANDLER_ID,
+        [
+            [hayata, agent, invocation, start],
+            [hayata, agent, invocation, stop],
+            [hayata, agent, invocation, exception]
+        ],
+        fun ?MODULE:handle_event/4,
+        #{}
+    ).
+
+detach() ->
+    telemetry:detach(?HANDLER_ID).
+
+handle_event(Event, Measurements, Metadata, _Config) ->
+    logger:info(
+        "Hayata telemetry event",
+        #{
+            event => Event,
+            measurements => Measurements,
+            metadata => Metadata
+        }
+    ).
+```
+
+Call `my_hayata_telemetry:attach/0` during application startup and `my_hayata_telemetry:detach/0` when the handler is no longer needed. Keep handlers lightweight; forward expensive processing to a dedicated process or metrics backend.
+
 ## Fault handling and recovery
 
 EUnit tests cover node restart and invocation failure, stale notifications, reducer recovery, execution cancellation, and edge cleanup after node failure.
@@ -152,36 +194,6 @@ EUnit tests cover node restart and invocation failure, stale notifications, redu
 The edge watcher monitors the node independently. If the node dies, including through an untrappable `kill`, the watcher terminates its edge even though the node's `terminate/2` callback cannot run.
 
 **Current limitation:** edge task functions execute synchronously inside the edge GenServer callback. A blocked task prevents that GenServer from processing messages until the callback returns. The watcher can terminate the edge when the node disappears, but cancellation semantics for blocked tasks and their side effects remain an area for further review.
-
-## Decision policy contract
-
-The decision policy is a synchronous, deterministic control-flow function. Its
-responsibility is to decide whether the agent should execute another node or
-finish the current invocation.
-
-A decision policy receives the current agent context and returns one of the
-supported decisions:
-
-- `{next, NodeId, Input}` — schedule the specified node with the given input.
-- `{finish, Result}` — finish the invocation with the provided result.
-- `{error, Reason}` — fail the invocation with the specified reason.
-
-Decision policies should be fast and should not perform long-running operations,
-blocking waits, or external I/O. They are evaluated synchronously by the agent
-coordinator, so a blocked policy prevents the coordinator from processing other
-messages, including invocation timeout messages.
-
-Long-running work belongs in node functions. Nodes can perform operations such
-as LLM requests, HTTP calls, database access, and computationally intensive
-tasks without placing that work directly in the decision policy.
-
-The agent coordinator owns the invocation lifecycle and enforces the global
-invocation timeout. Node execution has its own timeout configuration. Users
-should configure appropriate limits for their workloads while keeping the
-global invocation timeout in mind.
-
-This separation keeps control-flow decisions simple and makes long-running
-work easier to isolate, monitor, cancel, and recover.
 
 ## Requirements
 
