@@ -35,22 +35,22 @@ This example uses a mock node that adds a greeting to the state; it does not cal
 run() ->
     AgentId = hello_agent,
 
-    %% 1. Define a node function. It receives the current state.
     MockLlm = fun(State) ->
         Message = maps:get(input, State, <<"Hola">>),
-        #{messages => [
-            #{role => ai, content => <<"¡Hola mundo!">>},
-            #{role => user, content => Message}
-        ]}
+        #{
+            messages => [
+                #{role => ai, content => <<"¡Hola mundo!">>},
+                #{role => user, content => Message}
+            ]
+        }
     end,
 
-    %% 2. Define the node catalog and control flow.
-    %% First visit the mock_llm node; on the next policy evaluation, finish.
     Nodes = #{mock_llm => MockLlm},
+
     DecisionPolicy = fun(Context) ->
         case maps:get(step, Context) of
             0 ->
-                {next, mock_llm, undefined};
+                {next, mock_llm, <<"Hola">>};
             1 ->
                 {finish, maps:get(state, Context)}
         end
@@ -65,35 +65,44 @@ run() ->
         execution_timeout => 5000
     },
 
-    %% 3. Start the supervision tree and get the agent process.
-    {ok, SupPid} = hayata_agent_sup:start_link(Config),
-    {ok, AgentPid} = hayata_agent_sup:agent(SupPid),
-
-    try
-        %% 4. Invoke the agent with input.
-        {ok, _InvocationId} = hayata_agent:run(
-            AgentPid,
-            #{input => <<"Hola">>}
-        ),
-
-        %% 5. Wait for the asynchronous invocation to finish.
-        Result = await_result(AgentPid, 100),
-        io:format("~p~n", [Result]),
-        Result
-    after
-        %% Stop the agent and its supervised processes.
-        ok = hayata_agent:stop(AgentPid)
+    case hayata_sup:start_agent(Config) of
+        {ok, AgentSupPid} ->
+            try
+                run_agent(AgentSupPid)
+            after
+                hayata_sup:stop_agent(AgentSupPid)
+            end;
+        {error, Reason} ->
+            {error, {agent_start_failed, Reason}}
     end.
 
-await_result(_AgentPid, 0) ->
-    {error, timeout};
-await_result(AgentPid, Attempts) ->
-    case hayata_agent:get_result(AgentPid) of
-        {error, no_result} ->
-            timer:sleep(10),
-            await_result(AgentPid, Attempts - 1);
-        Result ->
-            Result
+run_agent(AgentSupPid) ->
+    case hayata_agent_sup:agent(AgentSupPid) of
+        {ok, AgentPid} ->
+            case hayata_agent:run(
+                AgentPid,
+                #{input => <<"Hola">>},
+                self()
+            ) of
+                {ok, InvocationId} ->
+                    await_result(InvocationId, 100);
+                {error, Reason} ->
+                    {error, Reason}
+            end;
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+await_result(_InvocationId, 0) ->
+    {error, notification_timeout};
+await_result(InvocationId, Attempts) ->
+    receive
+        {hayata_agent_result, InvocationId, {ok, Result}} ->
+            {ok, Result};
+        {hayata_agent_result, InvocationId, {error, Reason}} ->
+            {error, Reason}
+    after 100 ->
+        await_result(InvocationId, Attempts - 1)
     end.
 ```
 
@@ -103,7 +112,25 @@ Save the module as `hello_hayata.erl` in a location included in your Erlang code
 hello_hayata:run().
 ```
 
-The invocation is asynchronous: `hayata_agent:run/2` returns an invocation ID, while `hayata_agent:get_result/1` returns the final result after the agent completes. The decision policy controls the flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
+### Invocation API
+
+Hayata supports two invocation APIs:
+
+- `hayata_agent:run(AgentPid, Input)` starts an asynchronous invocation and returns `{ok, InvocationId}`. Retrieve the result later using `hayata_agent:get_result/1`.
+- `hayata_agent:run(AgentPid, Input, SubscriptionPid)` starts an asynchronous invocation and sends the terminal result to the subscription process.
+
+The subscription receives one of these messages:
+
+```erlang
+{hayata_agent_result, InvocationId, {ok, Result}}
+{hayata_agent_result, InvocationId, {error, Reason}}
+```
+
+The `InvocationId` correlates the message with its invocation. Success, execution errors, and timeouts are reported through this message format. If an invocation is rejected before starting, for example because the agent is already running, `run/3` returns an error without sending a terminal-result notification for that rejected request.
+
+The subscription argument must be a PID; otherwise, `run/3` returns `{error, invalid_subscription_pid}`.
+
+The decision policy controls execution flow: `{next, NodeId, Input}` schedules a node, and `{finish, Result}` ends the invocation.
 
 Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current agent API; it does not claim feature-for-feature API parity.
 
