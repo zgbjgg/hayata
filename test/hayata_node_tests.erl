@@ -2503,6 +2503,51 @@ telemetry_emits_exception_for_reducer_recovery_failure_test() ->
         ok = hayata_test_telemetry:detach(HandlerId)
     end.
 
+start_execution_records_parallel_type_test() ->
+    AgentA = make_ref(),
+
+    with_node(AgentA, think_a, think, #{}, [], fun(Node) ->
+        ExecutionId = make_ref(),
+        Task = fun() -> result end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            [{result, Task}],
+            1000,
+            parallel,
+            self()
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(parallel, maps:get(type, Execution))
+    end).
+
+start_execution_defaults_to_isolated_type_test() ->
+    AgentA = make_ref(),
+
+    with_node(AgentA, think_a, think, #{}, [], fun(Node) ->
+        ExecutionId = make_ref(),
+        Task = fun() -> result end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            [{result, Task}],
+            1000,
+            self()
+        ),
+
+        Info = hayata_node:get_info(Node),
+        Executions = maps:get(executions, Info),
+        Execution = maps:get(ExecutionId, Executions),
+
+        ?assertEqual(isolated, maps:get(type, Execution))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
