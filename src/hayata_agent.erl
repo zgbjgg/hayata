@@ -40,7 +40,8 @@
     last_error = undefined,
     execution_timeout = 30000,
     timeout_ref = undefined,
-    invocation_start_time = undefined
+    invocation_start_time = undefined,
+    parallel_results = undefined
 }).
 
 -type config() :: #{
@@ -149,7 +150,8 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
                 result = undefined,
                 last_error = undefined,
                 timeout_ref = TimeoutRef,
-                invocation_start_time = InvocationStartTime
+                invocation_start_time = InvocationStartTime,
+                parallel_results = undefined
             },
             telemetry_start(State#agent_state.id, InvocationId),
             case evaluate_policy(NewState) of
@@ -194,6 +196,63 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #agent_state{}) ->
     {noreply, #agent_state{}}.
+
+handle_info(
+    {hayata_node_execution, NodeId, ExecutionId, FinalResult},
+    #agent_state{
+        status = running,
+        active_execution = #{
+            type := parallel,
+            pending := Pending
+        } = Transition
+    } = State
+) ->
+    case maps:find(NodeId, Pending) of
+        {ok, ExecutionId} ->
+            case extract_node_updates(FinalResult) of
+                {ok, Updates} ->
+                    Remaining = maps:remove(NodeId, Pending),
+                    Results = maps:put(
+                        NodeId,
+                        Updates,
+                        maps:get(results, Transition)
+                    ),
+                    UpdatedTransition = Transition#{
+                        pending => Remaining,
+                        results => Results
+                    },
+                    case map_size(Remaining) of
+                        0 ->
+                            OrderedResults = [
+                                maps:get(ResultNodeId, Results)
+                             || ResultNodeId <-
+                                    maps:get(node_ids, Transition)
+                            ],
+                            UpdatedState = State#agent_state{
+                                active_execution = undefined,
+                                parallel_results = OrderedResults
+                            },
+                            case evaluate_policy(UpdatedState) of
+                                {ok, NextState} ->
+                                    {noreply, NextState};
+                                {error, _Reason, NextState} ->
+                                    {noreply, NextState}
+                            end;
+                        _ ->
+                            {noreply, State#agent_state{
+                                active_execution = UpdatedTransition
+                            }}
+                    end;
+                {error, Reason} ->
+                    FailedState = State#agent_state{
+                        active_execution = Transition
+                    },
+                    {noreply, fail_invocation(Reason, FailedState)}
+            end;
+        _ ->
+            %% Ignore stale or unrelated execution notifications.
+            {noreply, State}
+    end;
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -353,11 +412,14 @@ evaluate_policy(State) ->
         state => State#agent_state.state,
         input => State#agent_state.invocation_input,
         step => State#agent_state.current_step,
-        max_steps => State#agent_state.max_steps
+        max_steps => State#agent_state.max_steps,
+        parallel_results => State#agent_state.parallel_results
     },
     try (State#agent_state.decision_policy)(Context) of
-        {next, NodeId, Input} ->
+        {next, NodeId, Input} when is_atom(NodeId) ->
             start_next_node(NodeId, Input, State);
+        {next, NodeIds, Input} when is_list(NodeIds) ->
+            start_parallel_nodes(NodeIds, Input, State);
         {finish, Result} ->
             CancelledState = cancel_invocation_timeout(State),
             CompletedState = CancelledState#agent_state{
@@ -475,6 +537,28 @@ apply_node_result(FinalResult, State) ->
             {error, {node_execution_failed, Status}, State}
     end.
 
+-spec extract_node_updates(map()) ->
+    {ok, map()} | {error, term()}.
+extract_node_updates(FinalResult) ->
+    case {
+        maps:get(status, FinalResult, undefined),
+        maps:get(errors, FinalResult, #{}),
+        maps:get(results, FinalResult, #{})
+    } of
+        {completed, Errors, _Results} when map_size(Errors) > 0 ->
+            {error, {node_execution_failed, Errors}};
+        {completed, _Errors, Results} ->
+            case maps:find(node_result, Results) of
+                {ok, {ok, Updates}} when is_map(Updates) ->
+                    {ok, Updates};
+                {ok, Other} ->
+                    {error, {invalid_node_result, Other}};
+                error ->
+                    {error, missing_node_result}
+            end;
+        {Status, _Errors, _Results} ->
+            {error, {node_execution_failed, Status}}
+    end.
 
 -spec fail_invocation(term(), #agent_state{}) -> #agent_state{}.
 fail_invocation(Reason, State) ->
@@ -519,7 +603,8 @@ fail_invocation_terminal(Reason, State, failed) ->
 
 -spec fail_invocation_state(term(), #agent_state{}) -> #agent_state{}.
 fail_invocation_state(Reason, State) ->
-    CancelledState = cancel_invocation_timeout(State),
+    ExecutionCancelledState = cancel_active_execution(State),
+    CancelledState = cancel_invocation_timeout(ExecutionCancelledState),
     CancelledState#agent_state{
         status = {error, Reason},
         result = undefined,
@@ -543,6 +628,20 @@ cancel_active_execution(
     #agent_state{
         id = AgentId,
         active_execution = #{
+            type := parallel,
+            pending := Pending
+        }
+    } = State
+) ->
+    cancel_parallel_executions(
+        AgentId,
+        maps:to_list(Pending),
+        State
+    );
+cancel_active_execution(
+    #agent_state{
+        id = AgentId,
+        active_execution = #{
             node_id := NodeId,
             execution_id := ExecutionId
         }
@@ -561,6 +660,22 @@ cancel_active_execution(
     end;
 cancel_active_execution(State) ->
     State.
+
+-spec cancel_parallel_executions(
+    term(),
+    [{atom(), reference()}],
+    #agent_state{}
+) -> #agent_state{}.
+cancel_parallel_executions(_AgentId, [], State) ->
+    State;
+cancel_parallel_executions(AgentId, [{NodeId, ExecutionId} | Rest], State) ->
+    case hayata_node:whereis(AgentId, NodeId) of
+        undefined ->
+            cancel_parallel_executions(AgentId, Rest, State);
+        NodePid ->
+            _ = hayata_node:cancel_execution(NodePid, ExecutionId),
+            cancel_parallel_executions(AgentId, Rest, State)
+    end.
 
 -spec notify_invocation_result(#agent_state{}, term()) ->
     #agent_state{}.
@@ -614,3 +729,130 @@ telemetry_exception(AgentId, InvocationId, StartTime, Class) ->
             class => Class
         }
     ).
+
+-spec start_parallel_nodes([atom()], term(), #agent_state{}) ->
+    {ok, #agent_state{}} | {error, term(), #agent_state{}}.
+start_parallel_nodes([], _Input, State) ->
+    Reason = {invalid_parallel_nodes, empty_list},
+    {error, Reason, fail_invocation(Reason, State)};
+start_parallel_nodes(NodeIds, Input, State) ->
+    case validate_parallel_nodes(NodeIds, State) of
+        ok ->
+            RemainingSteps =
+                State#agent_state.max_steps -
+                State#agent_state.current_step,
+            case length(NodeIds) =< RemainingSteps of
+                true ->
+                    start_parallel_node_executions(
+                        NodeIds,
+                        Input,
+                        State
+                    );
+                false ->
+                    Reason = max_steps_exceeded,
+                    {error, Reason, fail_invocation(Reason, State)}
+            end;
+        {error, Reason} ->
+            {error, Reason, fail_invocation(Reason, State)}
+    end.
+
+-spec validate_parallel_nodes([atom()], #agent_state{}) ->
+    ok | {error, term()}.
+validate_parallel_nodes(NodeIds, State) ->
+    case length(NodeIds) =:= length(lists:usort(NodeIds)) of
+        false ->
+            {error, {invalid_parallel_nodes, duplicate_node_ids}};
+        true ->
+            validate_parallel_node_ids(NodeIds, State)
+    end.
+
+-spec validate_parallel_node_ids([atom()], #agent_state{}) ->
+    ok | {error, term()}.
+validate_parallel_node_ids([], _State) ->
+    ok;
+validate_parallel_node_ids([NodeId | Rest], State) ->
+    case maps:find(NodeId, State#agent_state.nodes) of
+        error ->
+            {error, {unknown_node, NodeId}};
+        {ok, _NodeFun} ->
+            case hayata_node:whereis(State#agent_state.id, NodeId) of
+                undefined ->
+                    {error, {node_not_running, NodeId}};
+                _NodePid ->
+                    validate_parallel_node_ids(Rest, State)
+            end
+    end.
+
+-spec start_parallel_node_executions(
+    [atom()],
+    term(),
+    #agent_state{}
+) -> {ok, #agent_state{}} | {error, term(), #agent_state{}}.
+start_parallel_node_executions(NodeIds, Input, State) ->
+    Transition = #{
+        type => parallel,
+        node_ids => NodeIds,
+        pending => #{},
+        results => #{}
+    },
+    start_parallel_node_executions(
+        NodeIds,
+        Input,
+        Transition,
+        State
+    ).
+
+-spec start_parallel_node_executions(
+    [atom()],
+    term(),
+    map(),
+    #agent_state{}
+) -> {ok, #agent_state{}} | {error, term(), #agent_state{}}.
+start_parallel_node_executions([], _Input, Transition, State) ->
+    {ok, State#agent_state{
+        active_execution = Transition
+    }};
+start_parallel_node_executions(
+    [NodeId | Rest],
+    Input,
+    Transition,
+    State
+) ->
+    NodeFun = maps:get(NodeId, State#agent_state.nodes),
+    NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
+    ExecutionId = make_ref(),
+    NodeInput = maps:put(input, Input, State#agent_state.state),
+    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    case hayata_node:start_execution(
+        NodePid,
+        ExecutionId,
+        [{node_result, Task}],
+        30000,
+        self()
+    ) of
+        {ok, ExecutionId} ->
+            Pending = maps:put(
+                NodeId,
+                ExecutionId,
+                maps:get(pending, Transition)
+            ),
+            UpdatedTransition = Transition#{pending => Pending},
+            UpdatedState = State#agent_state{
+                current_step = State#agent_state.current_step + 1
+            },
+            start_parallel_node_executions(
+                Rest,
+                Input,
+                UpdatedTransition,
+                UpdatedState
+            );
+        {error, Reason} ->
+            Error = {node_execution_start_failed, NodeId, Reason},
+            FailedTransition = Transition#{
+                pending => maps:get(pending, Transition)
+            },
+            FailedState = State#agent_state{
+                active_execution = FailedTransition
+            },
+            {error, Error, fail_invocation(Error, FailedState)}
+    end.

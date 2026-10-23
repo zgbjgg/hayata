@@ -1389,6 +1389,247 @@ telemetry_emits_exception_for_policy_exception_test() ->
         ok = hayata_test_telemetry:detach(HandlerId)
     end.
 
+parallel_results_preserve_order_and_isolate_state_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{original => true},
+        nodes => #{
+            first => fun(_State) ->
+                Parent ! {parallel_started, first, self()},
+                receive
+                    continue_first -> #{first_result => 1}
+                end
+            end,
+            second => fun(_State) ->
+                Parent ! {parallel_started, second, self()},
+                #{second_result => 2}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, [first, second], undefined};
+                2 ->
+                    {finish, #{
+                        state => maps:get(state, Context),
+                        results => maps:get(parallel_results, Context)
+                    }}
+            end
+        end,
+        max_steps => 3,
+        execution_timeout => 2000
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        FirstPid = receive
+            {parallel_started, first, Pid1} -> Pid1
+        after 2000 ->
+            error(first_parallel_node_not_started)
+        end,
+
+        receive
+            {parallel_started, second, _Pid2} -> ok
+        after 2000 ->
+            error(second_parallel_node_not_started)
+        end,
+
+        %% Let the first branch finish only after the second has completed.
+        timer:sleep(50),
+        FirstPid ! continue_first,
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{
+                state => #{original => true},
+                results => [
+                    #{first_result => 1},
+                    #{second_result => 2}
+                ]
+            }},
+            hayata_agent:get_result(Agent)
+        ),
+
+        ?assertEqual(
+            #{original => true},
+            hayata_agent:get_state(Agent)
+        )
+    end).
+
+parallel_branch_failure_cancels_pending_branches_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{original => true},
+        nodes => #{
+            failing => fun(_State) ->
+                erlang:error(parallel_branch_failed)
+            end,
+            blocking => fun(_State) ->
+                Parent ! {blocking_branch_started, self()},
+                receive
+                    continue -> #{partial => true}
+                end
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [failing, blocking], undefined}
+        end,
+        max_steps => 3,
+        execution_timeout => 2000
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        BlockingPid = receive
+            {blocking_branch_started, Pid} -> Pid
+        after 2000 ->
+            error(blocking_branch_not_started)
+        end,
+
+        await_terminal_status(Agent, 300),
+
+        ?assertMatch(
+            {error, _Reason},
+            hayata_agent:get_result(Agent)
+        ),
+
+        ?assertEqual(
+            #{original => true},
+            hayata_agent:get_state(Agent)
+        ),
+
+        ?assertNot(is_process_alive(BlockingPid))
+    end).
+
+parallel_execution_timeout_cancels_all_branches_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{original => true},
+        nodes => #{
+            first => fun(_State) ->
+                Parent ! {timeout_branch_started, first, self()},
+                receive
+                    continue -> #{first => done}
+                end
+            end,
+            second => fun(_State) ->
+                Parent ! {timeout_branch_started, second, self()},
+                receive
+                    continue -> #{second => done}
+                end
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [first, second], undefined}
+        end,
+        max_steps => 3,
+        execution_timeout => 300
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        FirstPid = receive
+            {timeout_branch_started, first, Pid1} -> Pid1
+        after 2000 ->
+            error(first_timeout_branch_not_started)
+        end,
+
+        SecondPid = receive
+            {timeout_branch_started, second, Pid2} -> Pid2
+        after 2000 ->
+            error(second_timeout_branch_not_started)
+        end,
+
+        await_terminal_status(Agent, 300),
+
+        ?assertEqual(
+            {error, timeout},
+            hayata_agent:get_result(Agent)
+        ),
+
+        ?assertNot(is_process_alive(FirstPid)),
+        ?assertNot(is_process_alive(SecondPid)),
+
+        ?assertEqual(
+            #{original => true},
+            hayata_agent:get_state(Agent)
+        )
+    end).
+
+parallel_unknown_node_is_rejected_before_execution_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            first => fun(_State) ->
+                Parent ! parallel_node_should_not_run,
+                #{result => unexpected}
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [first, missing], undefined}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {error, {unknown_node, missing}},
+            hayata_agent:run(Agent, start)
+        ),
+
+        receive
+            parallel_node_should_not_run ->
+                error(node_started_before_validation)
+        after 100 ->
+            ok
+        end
+    end).
+
+parallel_duplicate_node_ids_are_rejected_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                Parent ! parallel_duplicate_node_should_not_run,
+                #{result => unexpected}
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [work, work], undefined}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {error, {invalid_parallel_nodes, duplicate_node_ids}},
+            hayata_agent:run(Agent, start)
+        ),
+
+        receive
+            parallel_duplicate_node_should_not_run ->
+                error(duplicate_node_started_before_validation)
+        after 100 ->
+            ok
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
