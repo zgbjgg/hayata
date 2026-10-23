@@ -483,6 +483,7 @@ start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
         ExecutionId,
         [{node_result, Task}],
         30000,
+        isolated,
         self()
     ) of
         {ok, ExecutionId} ->
@@ -828,6 +829,7 @@ start_parallel_node_executions(
         ExecutionId,
         [{node_result, Task}],
         30000,
+        parallel,
         self()
     ) of
         {ok, ExecutionId} ->

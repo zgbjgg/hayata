@@ -14,6 +14,7 @@
     start_edge/4,
     start_execution/4,
     start_execution/5,
+    start_execution/6,
     cancel_execution/2
 ]).
 
@@ -153,6 +154,35 @@ start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid)
         {start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}
     ).
 
+-doc("Starts an asynchronous execution with an explicit execution type and recipient.").
+-spec start_execution(
+    gen_server:server_ref(),
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    isolated | parallel,
+    pid()
+) -> {ok, term()} | {error, term()}.
+start_execution(
+    Node,
+    ExecutionId,
+    EdgeTasks,
+    TimeoutMs,
+    Type,
+    RecipientPid
+) when is_pid(RecipientPid) ->
+    gen_server:call(
+        Node,
+        {
+            start_execution,
+            ExecutionId,
+            EdgeTasks,
+            TimeoutMs,
+            Type,
+            RecipientPid
+        }
+    ).
+
 -doc("Cancels an active execution and its associated processes.").
 -spec cancel_execution(gen_server:server_ref(), term()) ->
     ok | {error, term()}.
@@ -254,6 +284,7 @@ handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs}, _From, State) 
         ExecutionId,
         EdgeTasks,
         TimeoutMs,
+        isolated,
         undefined,
         State
     );
@@ -262,6 +293,17 @@ handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}, 
         ExecutionId,
         EdgeTasks,
         TimeoutMs,
+        isolated,
+        RecipientPid,
+        State
+    );
+handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs, Type, RecipientPid}, _From, State)
+    when (Type =:= isolated orelse Type =:= parallel), is_pid(RecipientPid) ->
+    start_execution_request(
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        Type,
         RecipientPid,
         State
     );
@@ -411,9 +453,10 @@ edge_ids(EdgeTasks) ->
     term(),
     [edge_task()],
     non_neg_integer(),
+    isolated | parallel,
     #node_state{}
 ) -> {reply, {ok, term()} | {error, term()}, #node_state{}}.
-start_execution_processes(ExecutionId, EdgeTasks, TimeoutMs, State) ->
+start_execution_processes(ExecutionId, EdgeTasks, TimeoutMs, Type, State) ->
     EdgeIds = edge_ids(EdgeTasks),
     Config = #{
         node_pid => self(),
@@ -428,6 +471,7 @@ start_execution_processes(ExecutionId, EdgeTasks, TimeoutMs, State) ->
                 ExecutionId,
                 EdgeTasks,
                 TimeoutMs,
+                Type,
                 ReducerPid,
                 State
             );
@@ -440,6 +484,7 @@ start_execution_processes(ExecutionId, EdgeTasks, TimeoutMs, State) ->
     term(),
     [edge_task()],
     non_neg_integer(),
+    isolated | parallel,
     pid(),
     #node_state{}
 ) -> {reply, {ok, term()} | {error, term()}, #node_state{}}.
@@ -447,6 +492,7 @@ start_execution_reducer(
     ExecutionId,
     EdgeTasks,
     TimeoutMs,
+    Type,
     ReducerPid,
     State
 ) ->
@@ -468,7 +514,8 @@ start_execution_reducer(
         deadline => erlang:monotonic_time(millisecond) + TimeoutMs,
         results => #{},
         errors => #{},
-        started_at => erlang:monotonic_time()
+        started_at => erlang:monotonic_time(),
+        type => Type
     },
     Executions = maps:put(
         ExecutionId,
@@ -1056,6 +1103,7 @@ handle_active_edge_result(EdgeId, ExecutionId, Result, State) ->
     term(),
     [edge_task()],
     non_neg_integer(),
+    isolated | parallel,
     pid() | undefined,
     #node_state{}
 ) -> {reply, term(), #node_state{}}.
@@ -1063,6 +1111,7 @@ start_execution_request(
     ExecutionId,
     EdgeTasks,
     TimeoutMs,
+    Type,
     RecipientPid,
     State
 ) ->
@@ -1079,6 +1128,7 @@ start_execution_request(
                         ExecutionId,
                         EdgeTasks,
                         TimeoutMs,
+                        Type,
                         RecipientPid,
                         State
                     )
@@ -1091,6 +1141,7 @@ start_execution_request(
     term(),
     [edge_task()],
     non_neg_integer(),
+    isolated | parallel,
     pid() | undefined,
     #node_state{}
 ) -> {reply, term(), #node_state{}}.
@@ -1098,6 +1149,7 @@ start_execution_with_recipient(
     ExecutionId,
     EdgeTasks,
     TimeoutMs,
+    Type,
     RecipientPid,
     State
 ) ->
@@ -1105,6 +1157,7 @@ start_execution_with_recipient(
         ExecutionId,
         EdgeTasks,
         TimeoutMs,
+        Type,
         State
     ) of
         {reply, {ok, ExecutionId}, NewState} ->
