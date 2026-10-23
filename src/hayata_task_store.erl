@@ -6,7 +6,8 @@
     get_invocation/2,
     save_invocation/1,
     get_task/1,
-    save_task_result/2
+    save_task_result/2,
+    claim_task/2
 ]).
 
 -record(hayata_invocation_checkpoint, {
@@ -102,6 +103,56 @@ save_invocation(_Checkpoint) ->
     {ok, checkpoint()} | {error, term()}.
 get_task(Key) ->
     transaction_get(?TASK_TABLE, Key).
+
+
+-doc("Atomically claims a task or returns its persisted outcome.").
+-spec claim_task(term(), map()) ->
+    {ok, execute | {completed, term()}}
+    | {error, task_execution_uncertain}
+    | {error, term()}.
+claim_task(Key, Metadata) when is_map(Metadata) ->
+    Timestamp = erlang:system_time(millisecond),
+    Transaction = fun() ->
+        case mnesia:read(?TASK_TABLE, Key, write) of
+            [] ->
+                Checkpoint = Metadata#{
+                    status => running,
+                    started_at => Timestamp,
+                    updated_at => Timestamp,
+                    version => ?SCHEMA_VERSION
+                },
+                mnesia:write({
+                    ?TASK_TABLE,
+                    Key,
+                    Checkpoint
+                }),
+                execute;
+            [{?TASK_TABLE, Key, Checkpoint}] ->
+                case maps:find(status, Checkpoint) of
+                    {ok, completed} ->
+                        case maps:find(result, Checkpoint) of
+                            {ok, Result} ->
+                                {completed, Result};
+                            error ->
+                                task_execution_uncertain
+                        end;
+                    _ ->
+                        task_execution_uncertain
+                end
+        end
+    end,
+    case mnesia:transaction(Transaction) of
+        {atomic, execute} ->
+            {ok, execute};
+        {atomic, {completed, Result}} ->
+            {ok, {completed, Result}};
+        {atomic, task_execution_uncertain} ->
+            {error, task_execution_uncertain};
+        {aborted, Reason} ->
+            {error, Reason}
+    end;
+claim_task(_Key, _Metadata) ->
+    {error, invalid_metadata}.
 
 -doc("Persists a completed task result before notifying other processes.").
 -spec save_task_result(task_key(), term()) -> ok | {error, term()}.
