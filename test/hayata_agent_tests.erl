@@ -1689,6 +1689,80 @@ parallel_results_are_cleared_after_next_transition_test() ->
         )
     end).
 
+parallel_start_failure_cancels_started_branches_test() ->
+    Parent = self(),
+    Counter = counters:new(1, []),
+
+    StartExecution = fun(
+        NodePid,
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        Type,
+        RecipientPid
+    ) ->
+        Count = counters:add(Counter, 1, 1),
+        case Count of
+            1 ->
+                hayata_node:start_execution(
+                    NodePid,
+                    ExecutionId,
+                    EdgeTasks,
+                    TimeoutMs,
+                    Type,
+                    RecipientPid
+                );
+            2 ->
+                {error, injected_start_failure}
+        end
+    end,
+
+    Config = #{
+        id => make_ref(),
+        state => #{original => true},
+        nodes => #{
+            first => fun(_State) ->
+                Parent ! {branch_started, self()},
+                receive
+                    continue -> #{partial => true}
+                end
+            end,
+            second => fun(_State) ->
+                #{unexpected => true}
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [first, second], undefined}
+        end,
+        max_steps => 3,
+        execution_timeout => 2000,
+        execution_starter => StartExecution
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        BranchPid = receive
+            {branch_started, Pid} -> Pid
+        after 2000 ->
+            error(first_branch_not_started)
+        end,
+
+        await_terminal_status(Agent, 300),
+
+        ?assertMatch(
+            {error, _Reason},
+            hayata_agent:get_result(Agent)
+        ),
+
+        ?assertEqual(
+            #{original => true},
+            hayata_agent:get_state(Agent)
+        ),
+
+        ?assertNot(is_process_alive(BranchPid))
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->

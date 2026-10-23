@@ -41,7 +41,8 @@
     execution_timeout = 30000,
     timeout_ref = undefined,
     invocation_start_time = undefined,
-    parallel_results = undefined
+    parallel_results = undefined,
+    execution_starter = fun hayata_node:start_execution/6
 }).
 
 -type config() :: #{
@@ -117,7 +118,8 @@ init(Config) ->
                     fun default_decision_policy/1
                 ),
                 max_steps = maps:get(max_steps, Config, 10),
-                execution_timeout = maps:get(execution_timeout, Config, 30000)
+                execution_timeout = maps:get(execution_timeout, Config, 30000),
+                execution_starter = maps:get(execution_starter, Config, fun hayata_node:start_execution/6)
             }};
         {error, Reason} ->
             {stop, Reason}
@@ -824,7 +826,9 @@ start_parallel_node_executions(
     ExecutionId = make_ref(),
     NodeInput = maps:put(input, Input, State#agent_state.state),
     Task = fun() -> execute_node(NodeFun, NodeInput) end,
-    case hayata_node:start_execution(
+    StartExecution = State#agent_state.execution_starter,
+
+    case StartExecution(
         NodePid,
         ExecutionId,
         [{node_result, Task}],
