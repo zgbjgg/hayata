@@ -1630,6 +1630,65 @@ parallel_duplicate_node_ids_are_rejected_test() ->
         end
     end).
 
+parallel_results_are_cleared_after_next_transition_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{original => true},
+        nodes => #{
+            first => fun(_State) ->
+                #{first_result => 1}
+            end,
+            second => fun(_State) ->
+                #{second_result => 2}
+            end,
+            aggregate => fun(_State) ->
+                #{aggregated => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    ?assertEqual(
+                        undefined,
+                        maps:get(parallel_results, Context)
+                    ),
+                    {next, [first, second], undefined};
+
+                2 ->
+                    ?assertEqual(
+                        [
+                            #{first_result => 1},
+                            #{second_result => 2}
+                        ],
+                        maps:get(parallel_results, Context)
+                    ),
+                    {next, aggregate, undefined};
+
+                3 ->
+                    ?assertEqual(
+                        undefined,
+                        maps:get(parallel_results, Context)
+                    ),
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 4
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{
+                original => true,
+                aggregated => true
+            }},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
