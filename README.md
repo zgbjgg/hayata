@@ -134,6 +134,44 @@ The decision policy controls execution flow: `{next, NodeId, Input}` schedules a
 
 Unlike LangGraph's `StateGraph` builder, this example uses Hayata's current agent API; it does not claim feature-for-feature API parity.
 
+## Parallel node execution
+
+A decision policy can schedule multiple nodes in parallel by returning `{next, NodeIds, Input}`, where `NodeIds` is a non-empty list of distinct node identifiers.
+
+All branch nodes receive the same input and the current shared agent state. Their returned maps are collected independently and do not modify the shared state.
+
+When every branch completes successfully, the policy receives the results through the `parallel_results` field in its context. Results are represented as a list of maps in the same order as the requested node identifiers, regardless of completion order.
+
+```erlang
+DecisionPolicy = fun(Context) ->
+    case maps:get(step, Context) of
+        0 ->
+            {next, [customer, orders], undefined};
+        2 ->
+            Results = maps:get(parallel_results, Context),
+            [Customer, Orders] = Results,
+            {next, aggregate, #{
+                customer => Customer,
+                orders => Orders
+            }};
+        3 ->
+            {finish, maps:get(state, Context)}
+    end
+end.
+```
+
+The `parallel_results` field follows these rules:
+
+- It is `undefined` before a parallel transition has completed.
+- After all branches complete successfully, it contains their ordered result maps.
+- It remains available to the decision policy that chooses the next transition.
+- When the policy schedules another node or parallel transition, the previous results are cleared.
+- A new invocation starts with `parallel_results` set to `undefined`.
+
+Parallel branch results are separate from the shared `state`. A subsequent node can consume the collected results through its input, for example by aggregating them into a single state update.
+
+If a branch fails or the invocation times out, the transition fails and pending branches are cancelled; incomplete parallel results are not published as a successful transition result.
+
 ## Execution lifecycle
 
 1. The node validates an execution request, edge tasks, and timeout.
