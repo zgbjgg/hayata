@@ -463,7 +463,7 @@ start_next_node(NodeId, Input, State) ->
                     Reason = {node_not_running, NodeId},
                     {error, Reason, fail_invocation(Reason, State)};
                 NodePid ->
-                    start_node_execution(NodePid, NodeId, NodeFun, Input, State)
+                    start_node_execution(NodePid, NodeId, NodeFun, Input, State#agent_state{parallel_results = undefined})
             end
     end.
 
@@ -747,7 +747,7 @@ start_parallel_nodes(NodeIds, Input, State) ->
                     start_parallel_node_executions(
                         NodeIds,
                         Input,
-                        State
+                        State#agent_state{parallel_results = undefined}
                     );
                 false ->
                     Reason = max_steps_exceeded,
