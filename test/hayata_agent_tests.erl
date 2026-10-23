@@ -1763,6 +1763,79 @@ parallel_start_failure_cancels_started_branches_test() ->
         ?assertNot(is_process_alive(BranchPid))
     end).
 
+telemetry_emits_stop_for_failed_invocation_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{respond => fun(_State) -> #{} end},
+        decision_policy => fun(_Context) ->
+            {error, test_failure}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        with_agent(Config, fun(Agent) ->
+            ?assertEqual(
+                {error, test_failure},
+                hayata_agent:run(Agent, hello)
+            ),
+
+            Events = hayata_test_telemetry:events(),
+            AgentId = maps:get(id, Config),
+
+            ?assertMatch(
+                [
+                    {
+                        hayata_telemetry_event,
+                        [hayata, agent, invocation, start],
+                        _StartMeasurements,
+                        #{
+                            agent_id := AgentId,
+                            invocation_id := InvocationId
+                        }
+                    },
+                    {
+                        hayata_telemetry_event,
+                        [hayata, agent, invocation, stop],
+                        #{duration := _},
+                        #{
+                            agent_id := AgentId,
+                            invocation_id := InvocationId,
+                            status := failed
+                        }
+                    }
+                ],
+                Events
+            ),
+
+            [
+                {
+                    hayata_telemetry_event,
+                    [hayata, agent, invocation, stop],
+                    #{duration := Duration},
+                    _Metadata
+                }
+            ] = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, agent, invocation, stop],
+                    _Measurements,
+                    _EventMetadata
+                } <- Events
+            ],
+
+            ?assert(is_integer(Duration)),
+            ?assert(Duration >= 0)
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
