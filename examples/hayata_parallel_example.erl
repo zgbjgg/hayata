@@ -47,6 +47,7 @@ run(Input) when is_list(Input) ->
 -spec node_a(map()) -> map().
 node_a(State) ->
     Input = maps:get(input, State),
+    timer:sleep(1000),
     #{
         results => [
             lists:flatten(io_lib:format("Result from A: ~s", [Input]))
