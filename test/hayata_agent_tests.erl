@@ -1701,7 +1701,8 @@ parallel_start_failure_cancels_started_branches_test() ->
         Type,
         RecipientPid
     ) ->
-        Count = counters:add(Counter, 1, 1),
+        ok = counters:add(Counter, 1, 1),
+        Count = counters:get(Counter, 1),
         case Count of
             1 ->
                 hayata_node:start_execution(
@@ -1740,7 +1741,8 @@ parallel_start_failure_cancels_started_branches_test() ->
     },
 
     with_agent(Config, fun(Agent) ->
-        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        {error, {node_execution_start_failed, second, injected_start_failure}} =
+            hayata_agent:run(Agent, start),
 
         BranchPid = receive
             {branch_started, Pid} -> Pid
@@ -1786,6 +1788,115 @@ telemetry_emits_stop_for_failed_invocation_test() ->
 
             Events = hayata_test_telemetry:events(),
             AgentId = maps:get(id, Config),
+
+            ?assertMatch(
+                [
+                    {
+                        hayata_telemetry_event,
+                        [hayata, agent, invocation, start],
+                        _StartMeasurements,
+                        #{
+                            agent_id := AgentId,
+                            invocation_id := InvocationId
+                        }
+                    },
+                    {
+                        hayata_telemetry_event,
+                        [hayata, agent, invocation, stop],
+                        #{duration := _},
+                        #{
+                            agent_id := AgentId,
+                            invocation_id := InvocationId,
+                            status := failed
+                        }
+                    }
+                ],
+                Events
+            ),
+
+            [
+                {
+                    hayata_telemetry_event,
+                    [hayata, agent, invocation, stop],
+                    #{duration := Duration},
+                    _Metadata
+                }
+            ] = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, agent, invocation, stop],
+                    _Measurements,
+                    _EventMetadata
+                } <- Events
+            ],
+
+            ?assert(is_integer(Duration)),
+            ?assert(Duration >= 0)
+        end)
+    after
+        ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+telemetry_emits_stop_when_node_execution_start_fails_test() ->
+    StartExecution = fun(
+        _NodePid,
+        _ExecutionId,
+        _EdgeTasks,
+        _TimeoutMs,
+        _Type,
+        _RecipientPid
+    ) ->
+        {error, injected_start_failure}
+    end,
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                #{result => unexpected}
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {next, [work], undefined}
+        end,
+        max_steps => 3,
+        execution_starter => StartExecution
+    },
+
+    ok = hayata_test_telemetry:ensure_telemetry_started(),
+    {ok, HandlerId} = hayata_test_telemetry:attach(),
+
+    try
+        with_agent(Config, fun(Agent) ->
+            ?assertEqual(
+                {
+                    error,
+                    {
+                        node_execution_start_failed,
+                        work,
+                        injected_start_failure
+                    }
+                },
+                hayata_agent:run(Agent, hello)
+            ),
+
+            Result = hayata_agent:get_result(Agent),
+            Events = hayata_test_telemetry:events(),
+            AgentId = maps:get(id, Config),
+
+            ?assertMatch(
+                {
+                    error,
+                    {
+                        node_execution_start_failed,
+                        work,
+                        injected_start_failure
+                    }
+                },
+                Result
+            ),
 
             ?assertMatch(
                 [
