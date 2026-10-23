@@ -76,13 +76,32 @@ agents() ->
             supervisor:which_children(SupPid)
     end.
 
+
 -doc(false).
 -spec init([]) ->
-    {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
+    {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}
+    | {stop, term()}.
 init([]) ->
-    SupFlags = #{
-        strategy => one_for_one,
-        intensity => 5,
-        period => 10
-    },
-    {ok, {SupFlags, []}}.
+    case hayata_task_store:ensure_started() of
+        ok ->
+            SupFlags = #{
+                strategy => one_for_one,
+                intensity => 5,
+                period => 10
+            },
+            TaskLauncherSup = #{
+                id => hayata_task_launcher_sup,
+                start => {
+                    hayata_task_launcher_sup,
+                    start_link,
+                    []
+                },
+                restart => permanent,
+                shutdown => infinity,
+                type => supervisor,
+                modules => [hayata_task_launcher_sup]
+            },
+            {ok, {SupFlags, [TaskLauncherSup]}};
+        {error, Reason} ->
+            {stop, {task_store_start_failed, Reason}}
+    end.
