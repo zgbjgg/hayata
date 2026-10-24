@@ -503,7 +503,8 @@ start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
         current_step = State#agent_state.current_step + 1,
         active_execution = #{
             node_id => NodeId,
-            execution_id => ExecutionId
+            execution_id => ExecutionId,
+            node_input => NodeInput
         }
     },
     case persist_invocation_checkpoint(PlannedState) of
