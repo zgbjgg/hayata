@@ -3039,22 +3039,28 @@ cancels_started_parallel_recovery_branches_on_failure_test() ->
             hayata_agent:recover(Agent)
         ),
 
-        AlphaPid = receive
-            {alpha_branch_started, Pid0} ->
-                Pid0
-        after 2000 ->
-            error(alpha_branch_was_not_started)
-        end,
+        %% Alpha may be cancelled before its task function starts.
+        %% Verify the execution state instead of relying on a message
+        %% sent from inside the task function.
+        AlphaPid = hayata_node:whereis(AgentId, alpha),
+        AlphaInfo = hayata_node:get_info(AlphaPid),
+        AlphaExecution = maps:get(
+            FirstExecutionId,
+            maps:get(executions, AlphaInfo)
+        ),
 
-        %% The previously started alpha branch must be cancelled.
-        MonitorRef = erlang:monitor(process, AlphaPid),
+        ?assertEqual(
+            cancelled,
+            maps:get(status, AlphaExecution)
+        ),
 
-        receive
-            {'DOWN', MonitorRef, process, AlphaPid, _Reason} ->
-                ok
-        after 2000 ->
-            error(alpha_branch_was_not_cancelled)
-        end,
+        RemainingAlphaEdges = [
+            Edge
+            || Edge <- maps:values(maps:get(active_edges, AlphaInfo)),
+               maps:get(execution_id, Edge) =:= FirstExecutionId
+        ],
+
+        ?assertEqual([], RemainingAlphaEdges),
 
         ?assertEqual(
             recovery_required,
