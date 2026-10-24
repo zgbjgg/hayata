@@ -136,11 +136,6 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
         ok ->
             InvocationId = make_ref(),
             InvocationStartTime = erlang:monotonic_time(),
-            TimeoutRef = erlang:send_after(
-                State#agent_state.execution_timeout,
-                self(),
-                {invocation_timeout, InvocationId}
-            ),
             NewState = State#agent_state{
                 status = running,
                 state = State#agent_state.initial_state,
@@ -151,16 +146,15 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
                 active_execution = undefined,
                 result = undefined,
                 last_error = undefined,
-                timeout_ref = TimeoutRef,
+                timeout_ref = undefined,
                 invocation_start_time = InvocationStartTime,
                 parallel_results = undefined
             },
-            telemetry_start(State#agent_state.id, InvocationId),
-            case evaluate_policy(NewState) of
-                {ok, UpdatedState} ->
-                    {reply, {ok, InvocationId}, UpdatedState};
-                {error, Reason, UpdatedState} ->
-                    {reply, {error, Reason}, UpdatedState}
+            case create_invocation_checkpoint(NewState) of
+                ok ->
+                    start_persisted_invocation(NewState);
+                {error, Reason} ->
+                    {reply, {error, Reason}, State}
             end;
         {error, Reason} ->
             {reply, {error, Reason}, State}
@@ -862,3 +856,107 @@ start_parallel_node_executions(
             },
             {error, Error, fail_invocation(Error, FailedState)}
     end.
+
+
+-spec create_invocation_checkpoint(#agent_state{}) ->
+    ok | {error, term()}.
+create_invocation_checkpoint(State) ->
+    Checkpoint = #{
+        invocation_id => State#agent_state.invocation_id,
+        input => State#agent_state.invocation_input,
+        state => State#agent_state.state,
+        current_step => State#agent_state.current_step,
+        active_execution => State#agent_state.active_execution,
+        parallel_results => State#agent_state.parallel_results,
+        result => State#agent_state.result,
+        last_error => State#agent_state.last_error,
+        status => running
+    },
+    case hayata_task_store:create_invocation(
+        State#agent_state.id,
+        Checkpoint
+    ) of
+        {ok, created} ->
+            ok;
+        {ok, existing} ->
+            {error, invocation_already_exists};
+        {error, Reason} ->
+            {error, {invocation_checkpoint_create_failed, Reason}}
+    end.
+
+-spec start_persisted_invocation(#agent_state{}) ->
+    {reply, term(), #agent_state{}}.
+start_persisted_invocation(State) ->
+    InvocationId = State#agent_state.invocation_id,
+    TimeoutRef = erlang:send_after(
+        State#agent_state.execution_timeout,
+        self(),
+        {invocation_timeout, InvocationId}
+    ),
+    TimedState = State#agent_state{
+        timeout_ref = TimeoutRef
+    },
+    case persist_invocation_checkpoint(TimedState) of
+        ok ->
+            telemetry_start(
+                TimedState#agent_state.id,
+                InvocationId
+            ),
+            evaluate_persisted_invocation(TimedState);
+        {error, Reason} ->
+            _ = erlang:cancel_timer(TimeoutRef),
+            {reply, {error, Reason}, State}
+    end.
+
+-spec evaluate_persisted_invocation(#agent_state{}) ->
+    {reply, term(), #agent_state{}}.
+evaluate_persisted_invocation(State) ->
+    case evaluate_policy(State) of
+        {ok, UpdatedState} ->
+            case persist_invocation_checkpoint(UpdatedState) of
+                ok ->
+                    {reply, {ok, UpdatedState#agent_state.invocation_id},
+                     UpdatedState};
+                {error, Reason} ->
+                    {reply, {error, Reason}, UpdatedState}
+            end;
+        {error, Reason, UpdatedState} ->
+            case persist_invocation_checkpoint(UpdatedState) of
+                ok ->
+                    {reply, {error, Reason}, UpdatedState};
+                {error, PersistReason} ->
+                    {reply, {error, PersistReason}, UpdatedState}
+            end
+    end.
+
+-spec persist_invocation_checkpoint(#agent_state{}) ->
+    ok | {error, term()}.
+persist_invocation_checkpoint(State) ->
+    Checkpoint = #{
+        agent_id => State#agent_state.id,
+        invocation_id => State#agent_state.invocation_id,
+        input => State#agent_state.invocation_input,
+        state => State#agent_state.state,
+        current_step => State#agent_state.current_step,
+        active_execution => State#agent_state.active_execution,
+        parallel_results => State#agent_state.parallel_results,
+        result => State#agent_state.result,
+        last_error => State#agent_state.last_error,
+        status => checkpoint_status(State#agent_state.status)
+    },
+    case hayata_task_store:save_invocation(Checkpoint) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, {invocation_checkpoint_save_failed, Reason}}
+    end.
+
+-spec checkpoint_status(term()) -> running | completed | failed.
+checkpoint_status(running) ->
+    running;
+checkpoint_status(completed) ->
+    completed;
+checkpoint_status({error, _Reason}) ->
+    failed;
+checkpoint_status(_Status) ->
+    failed.
