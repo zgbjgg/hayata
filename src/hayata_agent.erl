@@ -199,6 +199,15 @@ handle_call(recover, _From,
     #agent_state{
         status = recovery_required,
         active_execution = #{
+            type := parallel
+        } = ActiveExecution
+    } = State
+) ->
+    recover_parallel_execution(ActiveExecution, State);
+handle_call(recover, _From,
+    #agent_state{
+        status = recovery_required,
+        active_execution = #{
             node_id := NodeId,
             execution_id := ExecutionId,
             node_input := NodeInput
@@ -889,15 +898,12 @@ validate_parallel_node_ids([NodeId | Rest], State) ->
             end
     end.
 
--spec start_parallel_node_executions(
-    [atom()],
-    term(),
-    #agent_state{}
-) -> {ok, #agent_state{}} | {error, term(), #agent_state{}}.
 start_parallel_node_executions(NodeIds, Input, State) ->
+    NodeInput = maps:put(input, Input, State#agent_state.state),
     Transition = #{
         type => parallel,
         node_ids => NodeIds,
+        node_input => NodeInput,
         pending => #{},
         results => #{}
     },
@@ -907,7 +913,6 @@ start_parallel_node_executions(NodeIds, Input, State) ->
         Transition,
         State
     ).
-
 
 -spec start_parallel_node_executions(
     [atom()],
@@ -930,7 +935,7 @@ start_parallel_node_executions([NodeId | Rest], Input, Transition, State) ->
     NodeFun = maps:get(NodeId, State#agent_state.nodes),
     NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
     ExecutionId = make_ref(),
-    NodeInput = maps:put(input, Input, State#agent_state.state),
+    NodeInput = maps:get(node_input, Transition),
     Task = fun() -> execute_node(NodeFun, NodeInput) end,
     StartExecution = State#agent_state.execution_starter,
 
@@ -1319,4 +1324,287 @@ rollback_recovery_checkpoint(Reason, OriginalState) ->
                 PersistReason
             },
             {reply, {error, Error}, OriginalState}
+    end.
+
+-spec recover_parallel_execution(map(), #agent_state{}) ->
+    {reply, term(), #agent_state{}}.
+recover_parallel_execution(Transition, State) ->
+    Pending = maps:get(pending, Transition),
+    AgentId = State#agent_state.id,
+    Inspections = maps:map(
+        fun(_NodeId, ExecutionId) ->
+            inspect_recovery_task(AgentId, ExecutionId)
+        end,
+        Pending
+    ),
+    case validate_parallel_recovery(Inspections) of
+        ok ->
+            recover_inspected_parallel_execution(
+                Transition,
+                Inspections,
+                State
+            );
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
+
+-spec validate_parallel_recovery(map()) ->
+    ok | {error, term()}.
+validate_parallel_recovery(Inspections) ->
+    case lists:member(
+        task_execution_uncertain,
+        maps:values(Inspections)
+    ) of
+        true ->
+            {error, task_execution_uncertain};
+        false ->
+            case [
+                Reason
+             || {inspection_error, Reason} <-
+                    maps:values(Inspections)
+            ] of
+                [Reason | _] ->
+                    {error, {task_inspection_failed, Reason}};
+                [] ->
+                    ok
+            end
+    end.
+
+-spec recover_inspected_parallel_execution(
+    map(),
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_inspected_parallel_execution(Transition, Inspections, State) ->
+    Pending = maps:get(pending, Transition),
+    Results = maps:get(results, Transition),
+    case merge_completed_parallel_tasks(
+        maps:to_list(Inspections),
+        Pending,
+        Results
+    ) of
+        {ok, Remaining, UpdatedResults} ->
+            UpdatedTransition = Transition#{
+                pending => Remaining,
+                results => UpdatedResults
+            },
+            recover_parallel_remaining(
+                UpdatedTransition,
+                State
+            );
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
+
+-spec merge_completed_parallel_tasks(
+    [{atom(), term()}],
+    map(),
+    map()
+) -> {ok, map(), map()} | {error, term()}.
+merge_completed_parallel_tasks([], Pending, Results) ->
+    {ok, Pending, Results};
+merge_completed_parallel_tasks([{NodeId, {completed, {ok, Updates}}} | Rest], Pending, Results) when is_map(Updates) ->
+    merge_completed_parallel_tasks(
+        Rest,
+        maps:remove(NodeId, Pending),
+        maps:put(NodeId, Updates, Results)
+    );
+merge_completed_parallel_tasks([{NodeId, {completed, Other}} | _Rest], _Pending, _Results) ->
+    {error, {invalid_recovered_node_result, NodeId, Other}};
+merge_completed_parallel_tasks([{_NodeId, not_started} | Rest], Pending, Results) ->
+    merge_completed_parallel_tasks(Rest, Pending, Results).
+
+-spec recover_parallel_pending_nodes(
+    [{atom(), reference()}],
+    map(),
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_parallel_pending_nodes([], _NodeInput, Transition, State) ->
+    continue_recovered_parallel_execution(Transition, State);
+recover_parallel_pending_nodes(
+    [{NodeId, ExecutionId} | Rest],
+    NodeInput,
+    Transition,
+    State
+) ->
+    case {
+        maps:find(NodeId, State#agent_state.nodes),
+        hayata_node:whereis(State#agent_state.id, NodeId)
+    } of
+        {{ok, NodeFun}, NodePid} when is_pid(NodePid) ->
+            Task = fun() -> execute_node(NodeFun, NodeInput) end,
+            recover_parallel_node(
+                NodeId,
+                ExecutionId,
+                Task,
+                Rest,
+                NodeInput,
+                Transition,
+                State
+            );
+        {error, _NodePid} ->
+            rollback_recovery_checkpoint(
+                {unknown_node, NodeId},
+                State
+            );
+        {{ok, _NodeFun}, undefined} ->
+            rollback_recovery_checkpoint(
+                {node_not_running, NodeId},
+                State
+            )
+    end.
+
+-spec recover_parallel_node(
+    atom(),
+    reference(),
+    function(),
+    [{atom(), reference()}],
+    map(),
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_parallel_node(
+    NodeId,
+    ExecutionId,
+    Task,
+    Rest,
+    NodeInput,
+    Transition,
+    State
+) ->
+    NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
+    case hayata_node:recover_execution(
+        NodePid,
+        ExecutionId,
+        [{node_result, Task}],
+        State#agent_state.execution_timeout,
+        parallel,
+        self()
+    ) of
+        {ok, ExecutionId} ->
+            recover_parallel_started_nodes(
+                Rest,
+                NodeInput,
+                Transition,
+                State,
+                ExecutionId
+            );
+        {error, Reason} ->
+            rollback_recovery_checkpoint(
+                {parallel_node_recovery_failed, NodeId, Reason},
+                State
+            )
+    end.
+
+-spec recover_parallel_started_nodes(
+    [{atom(), reference()}],
+    map(),
+    map(),
+    #agent_state{},
+    reference()
+) -> {reply, term(), #agent_state{}}.
+recover_parallel_started_nodes(
+    [],
+    _NodeInput,
+    _Transition,
+    State,
+    FirstExecutionId
+) ->
+    {reply, {ok, FirstExecutionId}, State};
+recover_parallel_started_nodes(
+    [{NodeId, ExecutionId} | Rest],
+    NodeInput,
+    Transition,
+    State,
+    _FirstExecutionId
+) ->
+    recover_parallel_node(
+        NodeId,
+        ExecutionId,
+        fun() ->
+            execute_node(
+                maps:get(NodeId, State#agent_state.nodes),
+                NodeInput
+            )
+        end,
+        Rest,
+        NodeInput,
+        Transition,
+        State
+    ).
+
+recover_parallel_remaining(Transition, State) ->
+    NodeInput = maps:get(node_input, Transition, undefined),
+    case is_map(NodeInput) of
+        true ->
+            prepare_parallel_recovery(
+                Transition,
+                NodeInput,
+                State
+            );
+        false ->
+            {reply, {error, missing_parallel_node_input}, State}
+    end.
+
+-spec prepare_parallel_recovery(
+    map(),
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+prepare_parallel_recovery(Transition, NodeInput, OriginalState) ->
+    RecoveredState = OriginalState#agent_state{
+        status = running,
+        active_execution = Transition,
+        invocation_start_time = erlang:monotonic_time(),
+        timeout_ref = undefined
+    },
+    case persist_invocation_checkpoint(RecoveredState) of
+        ok ->
+            recover_parallel_pending_nodes(
+                maps:to_list(maps:get(pending, Transition)),
+                NodeInput,
+                Transition,
+                RecoveredState
+            );
+        {error, Reason} ->
+            {reply, {error, Reason}, OriginalState}
+    end.
+
+-spec continue_recovered_parallel_execution(
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+continue_recovered_parallel_execution(Transition, State) ->
+    NodeIds = maps:get(node_ids, Transition),
+    Results = maps:get(results, Transition),
+    OrderedResults = [
+        maps:get(NodeId, Results)
+     || NodeId <- NodeIds
+    ],
+    UpdatedState = State#agent_state{
+        status = running,
+        active_execution = undefined,
+        parallel_results = OrderedResults,
+        invocation_start_time = erlang:monotonic_time(),
+        timeout_ref = undefined
+    },
+    TimeoutRef = erlang:send_after(
+        UpdatedState#agent_state.execution_timeout,
+        self(),
+        {invocation_timeout, UpdatedState#agent_state.invocation_id}
+    ),
+    TimedState = UpdatedState#agent_state{
+        timeout_ref = TimeoutRef
+    },
+    case persist_invocation_checkpoint(TimedState) of
+        ok ->
+            telemetry_start(
+                TimedState#agent_state.id,
+                TimedState#agent_state.invocation_id
+            ),
+            evaluate_persisted_invocation(TimedState);
+        {error, Reason} ->
+            _ = erlang:cancel_timer(TimeoutRef),
+            rollback_recovery_checkpoint(Reason, State)
     end.

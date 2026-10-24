@@ -2788,6 +2788,76 @@ rejects_recovery_when_checkpoint_rollback_fails_test() ->
         end
     end).
 
+recovers_parallel_execution_with_not_started_branch_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [work],
+        node_input => #{progress => 1, input => original_input},
+        pending => #{work => ExecutionId},
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_State) ->
+                Parent ! {parallel_branch_executed, self()},
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            #{work => not_started},
+            maps:get(recovery_tasks, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        receive
+            {parallel_branch_executed, _Pid} ->
+                ok
+        after 2000 ->
+            error(parallel_branch_recovery_timeout)
+        end,
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, [#{recovered => true}]},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
