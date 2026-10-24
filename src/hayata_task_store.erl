@@ -143,7 +143,9 @@ claim_task(Key, Metadata) when is_map(Metadata) ->
                 end
         end
     end,
-    case mnesia:transaction(Transaction) of
+    ResultTrx = mnesia:sync_transaction(Transaction),
+    mnesia:dump_log(),
+    case ResultTrx of
         {atomic, execute} ->
             {ok, execute};
         {atomic, {completed, Result}} ->
@@ -183,7 +185,9 @@ save_task_result(Key, Result) ->
             Checkpoint
         })
     end,
-    transaction_result(mnesia:transaction(Transaction)).
+    ResultTrx = transaction_result(mnesia:sync_transaction(Transaction)),
+    mnesia:dump_log(),
+    ResultTrx.
 
 -doc("Retrieves the most recently updated running invocation for an agent.").
 -spec get_active_invocation(term()) ->
@@ -350,7 +354,9 @@ transaction_create(Table, Key, Checkpoint) ->
                 existing
         end
     end,
-    case mnesia:transaction(Transaction) of
+    ResultTrx = mnesia:sync_transaction(Transaction),
+    mnesia:dump_log(),
+    case ResultTrx of
         {atomic, Outcome} ->
             {ok, Outcome};
         {aborted, Reason} ->
@@ -378,7 +384,9 @@ transaction_write(Table, Key, Checkpoint) ->
     Transaction = fun() ->
         mnesia:write({Table, Key, Checkpoint})
     end,
-    transaction_result(mnesia:transaction(Transaction)).
+    ResultTrx = transaction_result(mnesia:sync_transaction(Transaction)),
+    mnesia:dump_log(),
+    ResultTrx.
 
 -spec transaction_result(term()) -> ok | {error, term()}.
 transaction_result({atomic, _Result}) ->
