@@ -310,6 +310,164 @@ telemetry_emits_exception_for_task_exception_test() ->
         ok = hayata_test_telemetry:detach(HandlerId)
     end.
 
+completed_checkpoint_is_reused_after_edge_restart_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    Parent = self(),
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+    Metadata = #{agent_id => AgentId},
+    ExpectedResult = {ok, #{processed => true}},
+
+    Task = fun() ->
+        {ok, #{processed => true}}
+    end,
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        Task,
+        Metadata
+    ),
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            ExpectedResult
+        },
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    RetryTask = fun() ->
+        Parent ! {task_reexecuted, self()},
+        {ok, unexpected_result}
+    end,
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        RetryTask,
+        Metadata
+    ),
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            ExpectedResult
+        },
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(SecondMonitor, SecondEdgePid)
+    ),
+
+    receive
+        {task_reexecuted, SecondEdgePid} ->
+            ?assert(false)
+    after 50 ->
+        ok
+    end.
+
+running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    Parent = self(),
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+    Metadata = #{agent_id => AgentId},
+
+    Task = fun() ->
+        Parent ! {task_started, self()},
+        receive
+            continue -> {ok, completed}
+        end
+    end,
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        Task,
+        Metadata
+    ),
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    receive
+        {task_started, FirstEdgePid} -> ok
+    after 1000 ->
+        error(task_start_timeout)
+    end,
+
+    exit(FirstEdgePid, kill),
+
+    ?assertEqual(
+        killed,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    RetryTask = fun() ->
+        Parent ! {task_reexecuted, self()},
+        {ok, unexpected_result}
+    end,
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        RetryTask,
+        Metadata
+    ),
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            {error, task_execution_uncertain}
+        },
+        receive_message()
+    ),
+
+    ?assertEqual(
+        {edge_failed, task_execution_uncertain},
+        receive_down(SecondMonitor, SecondEdgePid)
+    ),
+
+    receive
+        {task_reexecuted, SecondEdgePid} ->
+            ?assert(false)
+    after 50 ->
+        ok
+    end.
+
 receive_message() ->
     receive
         Message = {hayata_edge_result, _, _, _} ->
