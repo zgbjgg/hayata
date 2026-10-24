@@ -408,6 +408,7 @@ evaluate_policy(State) ->
             start_next_node(NodeId, Input, State);
         {next, NodeIds, Input} when is_list(NodeIds) ->
             start_parallel_nodes(NodeIds, Input, State);
+
         {finish, Result} ->
             CancelledState = cancel_invocation_timeout(State),
             CompletedState = CancelledState#agent_state{
@@ -416,12 +417,37 @@ evaluate_policy(State) ->
                 last_error = undefined,
                 active_execution = undefined
             },
-            telemetry_stop(
-                CompletedState#agent_state.id,
-                CompletedState#agent_state.invocation_id,
-                CompletedState#agent_state.invocation_start_time
-            ),
-            {ok, notify_invocation_result(CompletedState, {ok, Result})};
+            case persist_invocation_checkpoint(CompletedState) of
+                ok ->
+                    telemetry_stop(
+                        CompletedState#agent_state.id,
+                        CompletedState#agent_state.invocation_id,
+                        CompletedState#agent_state.invocation_start_time
+                    ),
+                    {ok, notify_invocation_result(
+                        CompletedState,
+                        {ok, Result}
+                    )};
+                {error, Reason} ->
+                    FailedState = fail_invocation_state(
+                        Reason,
+                        CompletedState
+                    ),
+                    case persist_invocation_checkpoint(FailedState) of
+                        ok ->
+                            telemetry_stop(
+                                FailedState#agent_state.id,
+                                FailedState#agent_state.invocation_id,
+                                FailedState#agent_state.invocation_start_time
+                            ),
+                            {error, Reason, notify_invocation_result(
+                                FailedState,
+                                {error, Reason}
+                            )};
+                        {error, PersistReason} ->
+                            {error, PersistReason, FailedState}
+                    end
+            end;
         {error, Reason} ->
             {error, Reason, fail_invocation(Reason, State)};
         Other ->
