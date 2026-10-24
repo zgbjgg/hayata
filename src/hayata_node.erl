@@ -255,9 +255,14 @@ handle_call({track_edge, EdgeId, EdgePid}, _From, State) ->
 handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
     case hayata_edge:start(
         self(),
+        undefined,
         EdgeId,
         ExecutionId,
-        TaskFun
+        TaskFun,
+        #{
+            agent_id => State#node_state.agent_id,
+            node_id => State#node_state.node_id
+        }
     ) of
         {ok, EdgePid} ->
             MonitorRef = erlang:monitor(process, EdgePid),
@@ -613,7 +618,11 @@ start_execution_edge(
         ReducerPid,
         EdgeId,
         ExecutionId,
-        TaskFun
+        TaskFun,
+        #{
+            agent_id => State#node_state.agent_id,
+            node_id => State#node_state.node_id
+        }
     ) of
         {ok, EdgePid} ->
             MonitorRef = erlang:monitor(process, EdgePid),

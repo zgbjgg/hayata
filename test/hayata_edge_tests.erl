@@ -3,6 +3,8 @@
 -include_lib("eunit/include/eunit.hrl").
 
 successful_execution_test() ->
+    _SupPid = start_hayata_runtime(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_01,
@@ -20,6 +22,8 @@ successful_execution_test() ->
     ?assertEqual(normal, receive_down(MonitorRef, EdgePid)).
 
 controlled_error_test() ->
+    _SupPid = start_hayata_runtime(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_02,
@@ -40,6 +44,8 @@ controlled_error_test() ->
     ).
 
 exception_test() ->
+    _SupPid = start_hayata_runtime(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_03,
@@ -62,6 +68,8 @@ exception_test() ->
     ).
 
 abrupt_termination_test() ->
+    _SupPid = start_hayata_runtime(),
+
     Parent = self(),
     {ok, EdgePid} = hayata_edge:start(
         self(),
@@ -91,6 +99,8 @@ abrupt_termination_test() ->
     ?assertEqual(no_message, receive_optional_message()).
 
 telemetry_emits_start_and_stop_for_successful_execution_test() ->
+    _SupPid = start_hayata_runtime(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -150,6 +160,8 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
     end.
 
 telemetry_emits_stop_for_controlled_error_test() ->
+    _SupPid = start_hayata_runtime(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -219,6 +231,8 @@ telemetry_emits_stop_for_controlled_error_test() ->
     end.
 
 telemetry_emits_exception_for_task_exception_test() ->
+    _SupPid = start_hayata_runtime(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -279,7 +293,7 @@ telemetry_emits_exception_for_task_exception_test() ->
                         edge_id := edge_telemetry_exception,
                         execution_id := execution_telemetry_exception,
                         class := error
-                    } = Metadata
+                    } = _Metadata
                 }
             ]
             when is_integer(Duration),
@@ -317,3 +331,9 @@ receive_optional_message() ->
     after 50 ->
         no_message
     end.
+
+start_hayata_runtime() ->
+    ok = hayata_task_store:ensure_started(),
+    {ok, SupPid} = hayata_sup:start_link(),
+    unlink(SupPid),
+    SupPid.

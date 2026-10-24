@@ -5,6 +5,7 @@
 -export([
     start/4,
     start/5,
+    start/6,
     execute/1
 ]).
 
@@ -23,6 +24,7 @@
     edge_id,
     execution_id,
     task,
+    metadata = #{},
     started_at = undefined
 }).
 
@@ -31,8 +33,7 @@
 -type task_result() :: {ok, term()} | {error, term()}.
 -type task_fun() :: fun(() -> task_result()).
 
-
- -doc("Starts an anonymous, linked edge process.").
+-doc("Starts an anonymous, linked edge process.").
 -spec start(pid(), edge_id(), execution_id(), task_fun()) ->
     gen_server:start_ret().
 start(NodePid, EdgeId, ExecutionId, TaskFun)
@@ -46,9 +47,39 @@ start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun)
         when is_pid(NodePid),
              (is_pid(ReducerPid) orelse ReducerPid =:= undefined),
              is_function(TaskFun, 0) ->
+    start(
+        NodePid,
+        ReducerPid,
+        EdgeId,
+        ExecutionId,
+        TaskFun,
+        #{}
+    ).
+
+-doc("Starts an edge with persistent task metadata.").
+-spec start(
+    pid(),
+    pid() | undefined,
+    edge_id(),
+    execution_id(),
+    task_fun(),
+    map()
+) -> gen_server:start_ret().
+start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun, Metadata)
+        when is_pid(NodePid),
+             (is_pid(ReducerPid) orelse ReducerPid =:= undefined),
+             is_function(TaskFun, 0),
+             is_map(Metadata) ->
     gen_server:start(
         ?MODULE,
-        {NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun},
+        {
+            NodePid,
+            ReducerPid,
+            EdgeId,
+            ExecutionId,
+            TaskFun,
+            Metadata
+        },
         []
     ).
 
@@ -64,9 +95,10 @@ execute(EdgePid) ->
     pid() | undefined,
     edge_id(),
     execution_id(),
-    task_fun()
+    task_fun(),
+    map()
 }) -> {ok, #edge_state{}}.
-init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun}) ->
+init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun, Metadata}) ->
     EdgePid = self(),
     ok = hayata_monitor:start(NodePid, EdgePid),
 
@@ -75,7 +107,8 @@ init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun}) ->
         reducer_pid = ReducerPid,
         edge_id = EdgeId,
         execution_id = ExecutionId,
-        task = TaskFun
+        task = TaskFun,
+        metadata = Metadata
     }}.
 
 -doc(false).
@@ -93,63 +126,37 @@ handle_cast(start, State) ->
     telemetry:execute(
         [hayata, edge, start],
         #{system_time => erlang:system_time()},
-        #{
-            edge_id => StartedState#edge_state.edge_id,
-            execution_id => StartedState#edge_state.execution_id
-        }
+        edge_metadata(StartedState)
     ),
-
-    Result = try
-        (StartedState#edge_state.task)()
-    catch
-        Class:Reason:Stacktrace ->
-            {error, {exception, Class, Reason, Stacktrace}}
-    end,
-
-    {Message, StopReason} = case Result of
-        {ok, Res} ->
-            {{ok, Res}, normal};
-
-        {error, ErrorReason} ->
-            {{error, ErrorReason}, {edge_failed, ErrorReason}}
-    end,
-
-    Duration = erlang:monotonic_time() - StartedState#edge_state.started_at,
-    Measurements = #{duration => Duration},
-    Metadata = #{
-        edge_id => StartedState#edge_state.edge_id,
-        execution_id => StartedState#edge_state.execution_id
+    TaskKey = task_key(StartedState),
+    Config = #{
+        task_key => TaskKey,
+        task_fun => StartedState#edge_state.task,
+        notify_pid => self(),
+        metadata => edge_metadata(StartedState)
     },
-    emit_terminal_event(Message, Measurements, Metadata),
-
-    ok = case StartedState#edge_state.reducer_pid of
-        undefined ->
-            ok;
-
-        ReducerPid ->
-            ReducerPid ! {
-                hayata_reducer_edge_result,
-                StartedState#edge_state.edge_id,
-                StartedState#edge_state.execution_id,
-                Message
-            },
-            ok
-    end,
-
-    StartedState#edge_state.node_pid ! {
-        hayata_edge_result,
-        StartedState#edge_state.edge_id,
-        StartedState#edge_state.execution_id,
-        Message
-    },
-
-    {stop, StopReason, StartedState};
+    case hayata_task_launcher_sup:start_task(Config) of
+        {ok, _LauncherPid} ->
+            {noreply, StartedState};
+        {ok, _LauncherPid, _Info} ->
+            {noreply, StartedState};
+        {error, Reason} ->
+            Message = {error, {task_launcher_start_failed, Reason}},
+            finish_edge(Message, StartedState)
+    end;
 handle_cast(_Request, State) ->
     {noreply, State}.
 
 -doc(false).
 -spec handle_info(term(), #edge_state{}) ->
-    {noreply, #edge_state{}}.
+    {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
+handle_info({hayata_task_result, TaskKey, Result}, State) ->
+    case TaskKey =:= task_key(State) of
+        true ->
+            finish_edge(Result, State);
+        false ->
+            {noreply, State}
+    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
@@ -186,3 +193,64 @@ emit_terminal_event(_Result, Measurements, Metadata) ->
         Measurements,
         Metadata
     ).
+
+-spec task_key(#edge_state{}) -> tuple().
+task_key(State) ->
+    Metadata = State#edge_state.metadata,
+    AgentId = maps:get(agent_id, Metadata, undefined),
+    {
+        AgentId,
+        State#edge_state.execution_id,
+        State#edge_state.edge_id
+    }.
+
+-spec edge_metadata(#edge_state{}) -> map().
+edge_metadata(State) ->
+    (State#edge_state.metadata)#{
+        edge_id => State#edge_state.edge_id,
+        execution_id => State#edge_state.execution_id
+    }.
+
+-spec finish_edge(term(), #edge_state{}) ->
+    {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
+finish_edge(Result, State) ->
+    Message = normalize_result(Result),
+    StopReason = case Message of
+        {ok, _Value} ->
+            normal;
+        {error, ErrorReason} ->
+            {edge_failed, ErrorReason}
+    end,
+    Duration = erlang:monotonic_time() - State#edge_state.started_at,
+    emit_terminal_event(
+        Message,
+        #{duration => Duration},
+        edge_metadata(State)
+    ),
+    case State#edge_state.reducer_pid of
+        undefined ->
+            ok;
+        ReducerPid ->
+            ReducerPid ! {
+                hayata_reducer_edge_result,
+                State#edge_state.edge_id,
+                State#edge_state.execution_id,
+                Message
+            }
+    end,
+    State#edge_state.node_pid ! {
+        hayata_edge_result,
+        State#edge_state.edge_id,
+        State#edge_state.execution_id,
+        Message
+    },
+    {stop, StopReason, State}.
+
+-spec normalize_result(term()) ->
+    {ok, term()} | {error, term()}.
+normalize_result({ok, _Value} = Result) ->
+    Result;
+normalize_result({error, _Reason} = Result) ->
+    Result;
+normalize_result(Other) ->
+    {error, {invalid_task_result, Other}}.
