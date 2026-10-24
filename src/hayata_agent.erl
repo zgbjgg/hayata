@@ -105,7 +105,7 @@ init(Config) ->
     case validate_config(Config) of
         ok ->
             InitialState = maps:get(state, Config, #{}),
-            {ok, #agent_state{
+            State = #agent_state{
                 id = maps:get(id, Config),
                 initial_state = InitialState,
                 state = InitialState,
@@ -119,8 +119,13 @@ init(Config) ->
                 ),
                 max_steps = maps:get(max_steps, Config, 10),
                 execution_timeout = maps:get(execution_timeout, Config, 30000),
-                execution_starter = maps:get(execution_starter, Config, fun hayata_node:start_execution/6)
-            }};
+                execution_starter = maps:get(
+                    execution_starter,
+                    Config,
+                    fun hayata_node:start_execution/6
+                )
+            },
+            {ok, restore_invocation_state(State)};
         {error, Reason} ->
             {stop, Reason}
     end.
@@ -131,6 +136,8 @@ init(Config) ->
     {stop, term(), term(), #agent_state{}}.
 handle_call({run, _Input, _SubscriptionPid}, _From, #agent_state{status = running} = State) ->
     {reply, {error, already_running}, State};
+handle_call({run, _Input, _SubscriptionPid}, _From, #agent_state{status = recovery_required} = State) ->
+    {reply, {error, recovery_required}, State};
 handle_call({run, Input, SubscriptionPid}, _From, State) ->
     case prepare_invocation(State) of
         ok ->
@@ -1086,4 +1093,46 @@ persist_parallel_result(UpdatedTransition, Remaining, Results, Transition, State
                     _ = persist_invocation_checkpoint(FailedState),
                     {noreply, FailedState}
             end
+    end.
+
+-spec restore_invocation_state(#agent_state{}) -> #agent_state{}.
+restore_invocation_state(State) ->
+    case hayata_task_store:get_active_invocation(
+        State#agent_state.id
+    ) of
+        {ok, Checkpoint} ->
+            State#agent_state{
+                status = recovery_required,
+                state = maps:get(
+                    state,
+                    Checkpoint,
+                    State#agent_state.initial_state
+                ),
+                current_step = maps:get(
+                    current_step,
+                    Checkpoint,
+                    0
+                ),
+                invocation_id = maps:get(
+                    invocation_id,
+                    Checkpoint
+                ),
+                invocation_input = maps:get(input, Checkpoint, undefined),
+                active_execution = maps:get(
+                    active_execution,
+                    Checkpoint,
+                    undefined
+                ),
+                parallel_results = maps:get(
+                    parallel_results,
+                    Checkpoint,
+                    undefined
+                ),
+                result = maps:get(result, Checkpoint, undefined),
+                last_error = maps:get(last_error, Checkpoint, undefined)
+            };
+        {error, not_found} ->
+            State;
+        {error, _Reason} ->
+            State
     end.
