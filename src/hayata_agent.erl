@@ -1254,32 +1254,50 @@ recover_inspected_node_execution(NodeId, ExecutionId, NodeInput, _TaskStatus, St
         hayata_node:whereis(State#agent_state.id, NodeId)
     } of
         {{ok, NodeFun}, NodePid} when is_pid(NodePid) ->
-            Task = fun() -> execute_node(NodeFun, NodeInput) end,
-            case hayata_node:recover_execution(
-                NodePid,
-                ExecutionId,
-                [{node_result, Task}],
-                State#agent_state.execution_timeout,
-                isolated,
-                self()
-            ) of
-                {ok, ExecutionId} ->
-                    RecoveredState = State#agent_state{
-                        status = running,
-                        invocation_start_time = erlang:monotonic_time(),
-                        timeout_ref = undefined
-                    },
-                    case persist_invocation_checkpoint(RecoveredState) of
-                        ok ->
-                            {reply, {ok, ExecutionId}, RecoveredState};
-                        {error, Reason} ->
-                            {reply, {error, {checkpoint_save_failed, Reason}}, State}
-                    end;
+            RecoveredState = State#agent_state{
+                status = running,
+                invocation_start_time = erlang:monotonic_time(),
+                timeout_ref = undefined
+            },
+            case persist_invocation_checkpoint(RecoveredState) of
+                ok ->
+                    recover_persisted_node_execution(
+                        NodePid,
+                        NodeFun,
+                        NodeInput,
+                        ExecutionId,
+                        RecoveredState,
+                        State
+                    );
                 {error, Reason} ->
-                    {reply, {error, Reason}, State}
+                    {reply, {error, {checkpoint_save_failed, Reason}}, State}
             end;
         {error, _NodePid} ->
             {reply, {error, {unknown_node, NodeId}}, State};
         {{ok, _NodeFun}, undefined} ->
             {reply, {error, {node_not_running, NodeId}}, State}
+    end.
+
+-spec recover_persisted_node_execution(
+    pid(),
+    function(),
+    map(),
+    reference(),
+    #agent_state{},
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_persisted_node_execution(NodePid, NodeFun, NodeInput, ExecutionId, RecoveredState, OriginalState) ->
+    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    case hayata_node:recover_execution(
+        NodePid,
+        ExecutionId,
+        [{node_result, Task}],
+        RecoveredState#agent_state.execution_timeout,
+        isolated,
+        self()
+    ) of
+        {ok, ExecutionId} ->
+            {reply, {ok, ExecutionId}, RecoveredState};
+        {error, Reason} ->
+            {reply, {error, Reason}, OriginalState}
     end.
