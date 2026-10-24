@@ -625,6 +625,19 @@ fail_invocation_exception(Class, Reason, State) ->
 ) -> #agent_state{}.
 fail_invocation_terminal(Reason, State, failed) ->
     FailedState = fail_invocation_state(Reason, State),
+    case persist_invocation_checkpoint(FailedState) of
+        ok ->
+            notify_failed_invocation(FailedState, Reason);
+        {error, PersistReason} ->
+            notify_failed_invocation(
+                FailedState,
+                {terminal_checkpoint_save_failed, Reason, PersistReason}
+            )
+    end.
+
+-spec notify_failed_invocation(#agent_state{}, term()) ->
+    #agent_state{}.
+notify_failed_invocation(FailedState, Reason) ->
     telemetry:execute(
         [hayata, agent, invocation, stop],
         #{
