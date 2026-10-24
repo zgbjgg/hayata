@@ -610,6 +610,27 @@ fail_invocation(Reason, State) ->
 ) -> #agent_state{}.
 fail_invocation_exception(Class, Reason, State) ->
     FailedState = fail_invocation_state(Reason, State),
+    case persist_invocation_checkpoint(FailedState) of
+        ok ->
+            notify_failed_invocation_exception(
+                FailedState,
+                Class,
+                Reason
+            );
+        {error, PersistReason} ->
+            notify_failed_invocation_exception(
+                FailedState,
+                Class,
+                {terminal_checkpoint_save_failed, Reason, PersistReason}
+            )
+    end.
+
+-spec notify_failed_invocation_exception(
+    #agent_state{},
+    term(),
+    term()
+) -> #agent_state{}.
+notify_failed_invocation_exception(FailedState, Class, Reason) ->
     telemetry_exception(
         FailedState#agent_state.id,
         FailedState#agent_state.invocation_id,
