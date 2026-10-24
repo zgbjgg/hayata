@@ -2629,6 +2629,165 @@ rejects_recovery_mismatch_without_stale_checkpoint_test() ->
         NodePid ! continue_conflicting_execution
     end).
 
+rejects_recovery_when_checkpoint_rollback_fails_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! recovered_node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        NodePid = hayata_node:whereis(AgentId, work),
+        BlockedTask = fun() ->
+            Parent ! conflicting_execution_started,
+            receive
+                continue_conflicting_execution -> ok
+            end
+        end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            NodePid,
+            ExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        receive
+            conflicting_execution_started -> ok
+        after 2000 ->
+            error(conflicting_execution_did_not_start)
+        end,
+
+        {ok, InitialCheckpoint} =
+            hayata_task_store:get_invocation(
+                AgentId,
+                InvocationId
+            ),
+        InitialUpdatedAt = maps:get(
+            updated_at,
+            InitialCheckpoint
+        ),
+
+        %% Hold the node until the intermediate checkpoint is saved.
+        timer:sleep(10),
+        ok = sys:suspend(NodePid),
+
+        spawn(fun() ->
+            Parent ! {
+                recovery_result,
+                hayata_agent:recover(Agent)
+            }
+        end),
+
+        try
+            _UpdatedCheckpoint = await_checkpoint_update(
+                AgentId,
+                InvocationId,
+                InitialUpdatedAt,
+                200
+            ),
+
+            %% The running checkpoint is saved; force rollback to fail.
+            {atomic, ok} = mnesia:change_table_access_mode(
+                hayata_invocation_checkpoint,
+                read_only
+            ),
+
+            ok = sys:resume(NodePid),
+
+            receive
+                {recovery_result, Result} ->
+                    ?assertMatch(
+                        {
+                            error,
+                            {
+                                recovery_failed_checkpoint_rollback_failed,
+                                recovery_execution_mismatch,
+                                _
+                            }
+                        },
+                        Result
+                    )
+            after 2000 ->
+                error(recovery_result_timeout)
+            end,
+
+            ?assertEqual(
+                recovery_required,
+                maps:get(status, hayata_agent:get_info(Agent))
+            ),
+
+            %% Rollback failed, so the intermediate checkpoint remains.
+            {ok, PersistedCheckpoint} =
+                hayata_task_store:get_invocation(
+                    AgentId,
+                    InvocationId
+                ),
+
+            ?assertEqual(
+                running,
+                maps:get(status, PersistedCheckpoint)
+            ),
+
+            ?assertEqual(
+                {error, no_result},
+                hayata_agent:get_result(Agent)
+            ),
+
+            receive
+                recovered_node_must_not_execute ->
+                    error(node_executed_after_recovery_failure)
+            after 100 ->
+                ok
+            end
+        after
+            _ = sys:resume(NodePid),
+            {atomic, ok} = mnesia:change_table_access_mode(
+                hayata_invocation_checkpoint,
+                read_write
+            ),
+            NodePid ! continue_conflicting_execution
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -2681,4 +2840,25 @@ await_new_node(AgentId, NodeId, OldPid, Attempts) ->
                 OldPid,
                 Attempts - 1
             )
+    end.
+
+await_checkpoint_update(_AgentId, _InvocationId, _PreviousUpdatedAt, 0) ->
+    error(checkpoint_update_timeout);
+await_checkpoint_update(AgentId, InvocationId, PreviousUpdatedAt, Attempts) ->
+    case hayata_task_store:get_invocation(AgentId, InvocationId) of
+        {ok, Checkpoint} ->
+            case maps:get(updated_at, Checkpoint) =/= PreviousUpdatedAt of
+                true ->
+                    Checkpoint;
+                false ->
+                    timer:sleep(10),
+                    await_checkpoint_update(
+                        AgentId,
+                        InvocationId,
+                        PreviousUpdatedAt,
+                        Attempts - 1
+                    )
+            end;
+        {error, Reason} ->
+            error({checkpoint_read_failed, Reason})
     end.
