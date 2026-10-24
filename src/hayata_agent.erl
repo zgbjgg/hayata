@@ -176,10 +176,10 @@ handle_call(get_info, _From, State) ->
         max_steps => State#agent_state.max_steps,
         invocation_id => State#agent_state.invocation_id,
         active_execution => State#agent_state.active_execution,
-        last_error => State#agent_state.last_error
+        last_error => State#agent_state.last_error,
+        recovery_tasks => inspect_recovery_tasks(State)
     },
     {reply, Info, State};
-
 handle_call(get_result, _From, #agent_state{status = completed, result = Result} = State) ->
     {reply, {ok, Result}, State};
 handle_call(get_result, _From, #agent_state{status = {error, Reason}} = State) ->
@@ -1135,4 +1135,55 @@ restore_invocation_state(State) ->
             State;
         {error, _Reason} ->
             State
+    end.
+
+-spec inspect_recovery_tasks(#agent_state{}) -> map().
+inspect_recovery_tasks(
+    #agent_state{
+        status = recovery_required,
+        id = AgentId,
+        active_execution = #{
+            node_id := NodeId,
+            execution_id := ExecutionId
+        }
+    }
+) ->
+    #{
+        NodeId => inspect_recovery_task(
+            AgentId,
+            ExecutionId
+        )
+    };
+inspect_recovery_tasks(
+    #agent_state{
+        status = recovery_required,
+        id = AgentId,
+        active_execution = #{
+            type := parallel,
+            pending := Pending
+        }
+    }
+) ->
+    maps:map(
+        fun(_NodeId, ExecutionId) ->
+            inspect_recovery_task(AgentId, ExecutionId)
+        end,
+        Pending
+    );
+inspect_recovery_tasks(_State) ->
+    #{}.
+
+-spec inspect_recovery_task(term(), reference()) -> term().
+inspect_recovery_task(AgentId, ExecutionId) ->
+    case hayata_task_store:inspect_task(
+        {AgentId, ExecutionId, node_result}
+    ) of
+        {ok, not_started} ->
+            not_started;
+        {ok, {completed, Result}} ->
+            {completed, Result};
+        {error, task_execution_uncertain} ->
+            task_execution_uncertain;
+        {error, Reason} ->
+            {inspection_error, Reason}
     end.

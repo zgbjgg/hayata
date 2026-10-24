@@ -2028,15 +2028,135 @@ restores_active_invocation_without_reexecuting_test() ->
             #{progress => 2},
             hayata_agent:get_state(Agent)
         ),
-
+        ?assertEqual(
+          #{work => not_started},
+          maps:get(recovery_tasks, Info)
+        ),
         ?assertEqual(
             {error, recovery_required},
             hayata_agent:run(Agent, new_input)
         ),
-
         ?assertEqual(
             recovery_required,
             maps:get(status, hayata_agent:get_info(Agent))
+        )
+    end).
+
+inspects_completed_task_during_recovery_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId
+    },
+    Result = {ok, #{answer => 42}},
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, ExecutionId, node_result},
+        Result
+    ),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{work => fun(_State) -> error(unexpected_execution) end},
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            #{work => {completed, Result}},
+            maps:get(recovery_tasks, Info)
+        ),
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        )
+    end).
+
+inspects_parallel_tasks_during_recovery_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    FirstResult = {ok, #{first => done}},
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [first, second],
+        pending => #{
+            first => FirstExecutionId,
+            second => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{},
+        current_step => 2,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, FirstExecutionId, node_result},
+        FirstResult
+    ),
+    {ok, execute} = hayata_task_store:claim_task(
+        {AgentId, SecondExecutionId, node_result},
+        #{}
+    ),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            first => fun(_State) -> error(unexpected_execution) end,
+            second => fun(_State) -> error(unexpected_execution) end
+        },
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            #{
+                first => {completed, FirstResult},
+                second => task_execution_uncertain
+            },
+            maps:get(recovery_tasks, Info)
+        ),
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
         )
     end).
 
