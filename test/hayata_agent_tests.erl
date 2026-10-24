@@ -2858,6 +2858,238 @@ recovers_parallel_execution_with_not_started_branch_test() ->
         )
     end).
 
+recovers_parallel_execution_with_multiple_not_started_branches_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [alpha, beta],
+        node_input => #{
+            progress => 1,
+            input => original_input
+        },
+        pending => #{
+            alpha => FirstExecutionId,
+            beta => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            alpha => fun(_State) ->
+                Parent ! {parallel_branch_executed, alpha},
+                #{alpha => recovered}
+            end,
+            beta => fun(_State) ->
+                Parent ! {parallel_branch_executed, beta},
+                #{beta => recovered}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            #{alpha => not_started, beta => not_started},
+            maps:get(recovery_tasks, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertMatch({ok, _}, hayata_agent:recover(Agent)),
+
+        ExecutedBranches = [
+            receive
+                {parallel_branch_executed, NodeId} ->
+                    NodeId
+            after 2000 ->
+                error(parallel_branch_recovery_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [alpha, beta],
+            lists:sort(ExecutedBranches)
+        ),
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, [
+                #{alpha => recovered},
+                #{beta => recovered}
+            ]},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+cancels_started_parallel_recovery_branches_on_failure_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [alpha, beta],
+        node_input => #{
+            progress => 1,
+            input => original_input
+        },
+        pending => #{
+            alpha => FirstExecutionId,
+            beta => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            alpha => fun(_State) ->
+                Parent ! {alpha_branch_started, self()},
+                receive
+                    continue_alpha ->
+                        #{alpha => recovered}
+                end
+            end,
+            beta => fun(_State) ->
+                Parent ! beta_should_not_execute,
+                #{beta => unexpected}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        BetaPid = hayata_node:whereis(AgentId, beta),
+        BlockedTask = fun() ->
+            Parent ! {conflicting_beta_execution_started, self()},
+            receive
+                 continue_conflicting_beta_execution -> ok
+            end
+        end,
+
+        {ok, SecondExecutionId} = hayata_node:start_execution(
+            BetaPid,
+            SecondExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        BlockedTaskPid = receive
+            {conflicting_beta_execution_started, Pid} ->
+                Pid
+        after 2000 ->
+            error(conflicting_beta_execution_did_not_start)
+        end,
+
+        ?assertEqual(
+            {error, {
+                parallel_node_recovery_failed,
+                beta,
+                recovery_execution_mismatch
+            }},
+            hayata_agent:recover(Agent)
+        ),
+
+        AlphaPid = receive
+            {alpha_branch_started, Pid0} ->
+                Pid0
+        after 2000 ->
+            error(alpha_branch_was_not_started)
+        end,
+
+        %% The previously started alpha branch must be cancelled.
+        MonitorRef = erlang:monitor(process, AlphaPid),
+
+        receive
+            {'DOWN', MonitorRef, process, AlphaPid, _Reason} ->
+                ok
+        after 2000 ->
+            error(alpha_branch_was_not_cancelled)
+        end,
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        %% The persisted checkpoint should be restored to its
+        %% pre-recovery status rather than left as running.
+        {ok, PersistedCheckpoint} = hayata_task_store:get_invocation(
+            AgentId,
+            InvocationId
+        ),
+
+        ?assertEqual(
+            running,
+            maps:get(status, PersistedCheckpoint)
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            beta_should_not_execute ->
+                error(beta_node_executed_despite_recovery_failure)
+        after 100 ->
+            ok
+        end,
+
+        %% Release the deliberately blocked conflicting execution.
+        BetaPid ! continue_conflicting_beta_execution,
+        BlockedTaskPid ! continue_conflicting_beta_execution
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
