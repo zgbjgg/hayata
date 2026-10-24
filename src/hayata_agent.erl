@@ -1477,7 +1477,7 @@ prepare_parallel_recovery(Transition, NodeInput, OriginalState) ->
     case persist_invocation_checkpoint(RecoveredState) of
         ok ->
             recover_parallel_pending_nodes(
-                maps:to_list(maps:get(pending, Transition)),
+                ordered_pending_tasks(Transition),
                 NodeInput,
                 RecoveredState,
                 OriginalState,
@@ -1610,3 +1610,13 @@ continue_recovered_parallel_execution(Transition, State) ->
             _ = erlang:cancel_timer(TimeoutRef),
             rollback_recovery_checkpoint(Reason, State)
     end.
+
+-spec ordered_pending_tasks(map()) -> [{atom(), reference()}].
+ordered_pending_tasks(Transition) ->
+    Pending = maps:get(pending, Transition),
+    NodeIds = maps:get(node_ids, Transition),
+    [
+        {NodeId, ExecutionId}
+     || NodeId <- NodeIds,
+        {ok, ExecutionId} <- [maps:find(NodeId, Pending)]
+    ].
