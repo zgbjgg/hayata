@@ -2365,6 +2365,91 @@ rejects_uncertain_task_recovery_test() ->
         end
     end).
 
+rejects_recovery_when_node_is_not_running_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, SupervisorPid} = gen_server:call(
+            Agent,
+            get_supervisor_pid
+        ),
+        {ok, NodeSupPid} = hayata_agent_sup:node_supervisor(
+            SupervisorPid
+        ),
+
+        ok = hayata_node_sup:stop_node(
+            NodeSupPid,
+            work
+        ),
+
+        ?assertEqual(
+            undefined,
+            hayata_node:whereis(AgentId, work)
+        ),
+
+        ?assertEqual(
+            {error, {node_not_running, work}},
+            hayata_agent:recover(Agent)
+        ),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            node_must_not_execute ->
+                error(node_executed_without_recovery_target)
+        after 100 ->
+            ok
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
