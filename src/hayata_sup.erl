@@ -89,19 +89,7 @@ init([]) ->
                 intensity => 5,
                 period => 10
             },
-            TaskLauncherSup = #{
-                id => hayata_task_launcher_sup,
-                start => {
-                    hayata_task_launcher_sup,
-                    start_link,
-                    []
-                },
-                restart => permanent,
-                shutdown => infinity,
-                type => supervisor,
-                modules => [hayata_task_launcher_sup]
-            },
-            {ok, {SupFlags, [TaskLauncherSup]}};
+            {ok, {SupFlags, []}};
         {error, Reason} ->
             {stop, {task_store_start_failed, Reason}}
     end.

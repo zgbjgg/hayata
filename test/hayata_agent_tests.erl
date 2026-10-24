@@ -1705,14 +1705,37 @@ parallel_start_failure_cancels_started_branches_test() ->
         Count = counters:get(Counter, 1),
         case Count of
             1 ->
-                hayata_node:start_execution(
+                Result = hayata_node:start_execution(
                     NodePid,
                     ExecutionId,
                     EdgeTasks,
                     TimeoutMs,
                     Type,
                     RecipientPid
-                );
+                ),
+                case Result of
+                    {ok, ExecutionId} ->
+                        Info = hayata_node:get_info(NodePid),
+                        ActiveEdges = maps:values(
+                            maps:get(active_edges, Info)
+                        ),
+                        case [
+                            Pid
+                            || #{
+                                execution_id := ActiveExecutionId,
+                                pid := Pid
+                            } <- ActiveEdges,
+                            ActiveExecutionId =:= ExecutionId
+                        ] of
+                            [BranchPid | _] ->
+                                Parent ! {branch_started, BranchPid};
+                            [] ->
+                                ok
+                        end,
+                        Result;
+                    _ ->
+                        Result
+                end;
             2 ->
                 {error, injected_start_failure}
         end
@@ -1723,7 +1746,6 @@ parallel_start_failure_cancels_started_branches_test() ->
         state => #{original => true},
         nodes => #{
             first => fun(_State) ->
-                Parent ! {branch_started, self()},
                 receive
                     continue -> #{partial => true}
                 end
@@ -1962,6 +1984,8 @@ await_terminal_status(Agent, Attempts) ->
     end.
 
 with_agent(Config, TestFun) ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, SupPid} = hayata_agent_sup:start_link(Config),
     unlink(SupPid),
     try

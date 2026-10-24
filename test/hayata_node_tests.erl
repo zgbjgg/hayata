@@ -2255,7 +2255,16 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
                 error(node_execution_timeout)
             end,
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {hayata_telemetry_event, _Name, _Measurements,
@@ -2342,7 +2351,16 @@ telemetry_emits_stop_for_cancelled_execution_test() ->
             ),
             ?assertEqual(cancelled, maps:get(status, Execution)),
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {hayata_telemetry_event, _Name, _Measurements,
@@ -2452,7 +2470,16 @@ telemetry_emits_exception_for_reducer_recovery_failure_test() ->
                 maps:get(status, Execution)
             ),
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {
@@ -2564,6 +2591,8 @@ await_edge_down(Node, Attempts) ->
     end.
 
 with_node(AgentId, NodeId, Name, InitialState, Edges, TestFun) ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, Node} = hayata_node:start_link(
         AgentId,
         NodeId,

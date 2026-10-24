@@ -3,7 +3,7 @@
 -include_lib("eunit/include/eunit.hrl").
 
 successful_execution_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     {ok, EdgePid} = hayata_edge:start(
         self(),
@@ -22,7 +22,7 @@ successful_execution_test() ->
     ?assertEqual(normal, receive_down(MonitorRef, EdgePid)).
 
 controlled_error_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     {ok, EdgePid} = hayata_edge:start(
         self(),
@@ -44,7 +44,7 @@ controlled_error_test() ->
     ).
 
 exception_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     {ok, EdgePid} = hayata_edge:start(
         self(),
@@ -68,13 +68,15 @@ exception_test() ->
     ).
 
 abrupt_termination_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     Parent = self(),
+    ExecutionId = make_ref(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_04,
-        execution_04,
+        ExecutionId,
         fun() ->
             Parent ! {task_started, self()},
             receive
@@ -99,7 +101,7 @@ abrupt_termination_test() ->
     ?assertEqual(no_message, receive_optional_message()).
 
 telemetry_emits_start_and_stop_for_successful_execution_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
@@ -160,7 +162,7 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
     end.
 
 telemetry_emits_stop_for_controlled_error_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
@@ -231,7 +233,7 @@ telemetry_emits_stop_for_controlled_error_test() ->
     end.
 
 telemetry_emits_exception_for_task_exception_test() ->
-    _SupPid = start_hayata_runtime(),
+    ok = hayata_task_store:ensure_started(),
 
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
@@ -331,9 +333,3 @@ receive_optional_message() ->
     after 50 ->
         no_message
     end.
-
-start_hayata_runtime() ->
-    ok = hayata_task_store:ensure_started(),
-    {ok, SupPid} = hayata_sup:start_link(),
-    unlink(SupPid),
-    SupPid.

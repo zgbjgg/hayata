@@ -129,21 +129,11 @@ handle_cast(start, State) ->
         edge_metadata(StartedState)
     ),
     TaskKey = task_key(StartedState),
-    Config = #{
-        task_key => TaskKey,
-        task_fun => StartedState#edge_state.task,
-        notify_pid => self(),
-        metadata => edge_metadata(StartedState)
-    },
-    case hayata_task_launcher_sup:start_task(Config) of
-        {ok, _LauncherPid} ->
-            {noreply, StartedState};
-        {ok, _LauncherPid, _Info} ->
-            {noreply, StartedState};
-        {error, Reason} ->
-            Message = {error, {task_launcher_start_failed, Reason}},
-            finish_edge(Message, StartedState)
-    end;
+    execute_persisted_task(
+        TaskKey,
+        edge_metadata(StartedState),
+        StartedState
+    );
 handle_cast(_Request, State) ->
     {noreply, State}.
 
@@ -193,6 +183,54 @@ emit_terminal_event(_Result, Measurements, Metadata) ->
         Measurements,
         Metadata
     ).
+
+-spec execute_persisted_task(tuple(), map(), #edge_state{}) ->
+    {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
+execute_persisted_task(TaskKey, Metadata, State) ->
+    case hayata_task_store:claim_task(TaskKey, Metadata) of
+        {ok, execute} ->
+            execute_and_persist(TaskKey, State);
+        {ok, {completed, Result}} ->
+            finish_edge(Result, State);
+        {error, task_execution_uncertain} ->
+            finish_edge(
+                {error, task_execution_uncertain},
+                State
+            );
+        {error, Reason} ->
+            finish_edge(
+                {error, {checkpoint_claim_failed, Reason}},
+                State
+            )
+    end.
+
+-spec execute_and_persist(tuple(), #edge_state{}) ->
+    {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
+execute_and_persist(TaskKey, State) ->
+    Result = run_task(State#edge_state.task),
+    case hayata_task_store:save_task_result(TaskKey, Result) of
+        ok ->
+            finish_edge(Result, State);
+        {error, Reason} ->
+            finish_edge(
+                {error, {checkpoint_persist_failed, Reason}},
+                State
+            )
+    end.
+
+-spec run_task(task_fun()) -> task_result().
+run_task(TaskFun) ->
+    try TaskFun() of
+        {ok, _Value} = Result ->
+            Result;
+        {error, _Reason} = Result ->
+            Result;
+        Other ->
+            {error, {invalid_task_result, Other}}
+    catch
+        Class:Reason:Stacktrace ->
+            {error, {exception, Class, Reason, Stacktrace}}
+    end.
 
 -spec task_key(#edge_state{}) -> tuple().
 task_key(State) ->
