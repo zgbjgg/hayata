@@ -402,6 +402,42 @@ get_active_invocation_returns_latest_test() ->
         maps:get(invocation_id, ActiveCheckpoint)
     ).
 
+
+inspect_missing_task_test() ->
+    ok = hayata_task_store:ensure_started(),
+    TaskKey = {make_ref(), make_ref(), node_result},
+
+    ?assertEqual(
+        {ok, not_started},
+        hayata_task_store:inspect_task(TaskKey)
+    ).
+
+inspect_completed_task_test() ->
+    ok = hayata_task_store:ensure_started(),
+    TaskKey = {make_ref(), make_ref(), node_result},
+    Result = {ok, #{value => 42}},
+
+    ok = hayata_task_store:save_task_result(TaskKey, Result),
+
+    ?assertEqual(
+        {ok, {completed, Result}},
+        hayata_task_store:inspect_task(TaskKey)
+    ).
+
+inspect_running_task_is_uncertain_test() ->
+    ok = hayata_task_store:ensure_started(),
+    TaskKey = {make_ref(), make_ref(), node_result},
+
+    ?assertEqual(
+        {ok, execute},
+        hayata_task_store:claim_task(TaskKey, #{})
+    ),
+
+    ?assertEqual(
+        {error, task_execution_uncertain},
+        hayata_task_store:inspect_task(TaskKey)
+    ).
+
 get_missing_task_test() ->
     ok = hayata_task_store:ensure_started(),
 

@@ -8,7 +8,8 @@
     get_task/1,
     save_task_result/2,
     claim_task/2,
-    get_active_invocation/1
+    get_active_invocation/1,
+    inspect_task/1
 ]).
 
 -record(hayata_invocation_checkpoint, {
@@ -212,6 +213,32 @@ get_active_invocation(AgentId) ->
         {atomic, none} ->
             {error, not_found};
         {aborted, Reason} ->
+            {error, Reason}
+    end.
+
+-doc("Classifies a persisted task without executing or modifying it.").
+-spec inspect_task(task_key()) ->
+    {ok, not_started | {completed, term()}}
+    | {error, term()}.
+inspect_task(Key) ->
+    case get_task(Key) of
+        {ok, Checkpoint} ->
+            case maps:get(status, Checkpoint, undefined) of
+                completed ->
+                    case maps:find(result, Checkpoint) of
+                        {ok, Result} ->
+                            {ok, {completed, Result}};
+                        error ->
+                            {error, task_execution_uncertain}
+                    end;
+                running ->
+                    {error, task_execution_uncertain};
+                _Status ->
+                    {error, task_execution_uncertain}
+            end;
+        {error, not_found} ->
+            {ok, not_started};
+        {error, Reason} ->
             {error, Reason}
     end.
 
