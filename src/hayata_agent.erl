@@ -192,7 +192,6 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #agent_state{}) ->
     {noreply, #agent_state{}}.
-
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -217,39 +216,22 @@ handle_info(
                         pending => Remaining,
                         results => Results
                     },
-                    case map_size(Remaining) of
-                        0 ->
-                            OrderedResults = [
-                                maps:get(ResultNodeId, Results)
-                             || ResultNodeId <-
-                                    maps:get(node_ids, Transition)
-                            ],
-                            UpdatedState = State#agent_state{
-                                active_execution = undefined,
-                                parallel_results = OrderedResults
-                            },
-                            case evaluate_policy(UpdatedState) of
-                                {ok, NextState} ->
-                                    {noreply, NextState};
-                                {error, _Reason, NextState} ->
-                                    {noreply, NextState}
-                            end;
-                        _ ->
-                            {noreply, State#agent_state{
-                                active_execution = UpdatedTransition
-                            }}
-                    end;
+                    persist_parallel_result(
+                        UpdatedTransition,
+                        Remaining,
+                        Results,
+                        Transition,
+                        State
+                    );
                 {error, Reason} ->
-                    FailedState = State#agent_state{
-                        active_execution = Transition
-                    },
-                    {noreply, fail_invocation(Reason, FailedState)}
+                    FailedState = fail_invocation(Reason, State),
+                    _ = persist_invocation_checkpoint(FailedState),
+                    {noreply, FailedState}
             end;
         _ ->
             %% Ignore stale or unrelated execution notifications.
             {noreply, State}
     end;
-
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -994,3 +976,49 @@ checkpoint_status({error, _Reason}) ->
     failed;
 checkpoint_status(_Status) ->
     failed.
+
+-spec persist_parallel_result(
+    map(),
+    map(),
+    map(),
+    map(),
+    #agent_state{}
+) -> {noreply, #agent_state{}}.
+persist_parallel_result(UpdatedTransition, Remaining, Results, Transition, State) ->
+    case map_size(Remaining) of
+        0 ->
+            OrderedResults = [
+                maps:get(ResultNodeId, Results)
+             || ResultNodeId <- maps:get(node_ids, Transition)
+            ],
+            UpdatedState = State#agent_state{
+                active_execution = undefined,
+                parallel_results = OrderedResults
+            },
+            case persist_invocation_checkpoint(UpdatedState) of
+                ok ->
+                    case evaluate_policy(UpdatedState) of
+                        {ok, NextState} ->
+                            {noreply, NextState};
+                        {error, _Reason, NextState} ->
+                            _ = persist_invocation_checkpoint(NextState),
+                            {noreply, NextState}
+                    end;
+                {error, Reason} ->
+                    FailedState = fail_invocation(Reason, UpdatedState),
+                    _ = persist_invocation_checkpoint(FailedState),
+                    {noreply, FailedState}
+            end;
+        _ ->
+            UpdatedState = State#agent_state{
+                active_execution = UpdatedTransition
+            },
+            case persist_invocation_checkpoint(UpdatedState) of
+                ok ->
+                    {noreply, UpdatedState};
+                {error, Reason} ->
+                    FailedState = fail_invocation(Reason, UpdatedState),
+                    _ = persist_invocation_checkpoint(FailedState),
+                    {noreply, FailedState}
+            end
+    end.
