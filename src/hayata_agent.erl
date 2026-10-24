@@ -9,7 +9,8 @@
     get_state/1,
     get_info/1,
     get_result/1,
-    stop/1
+    stop/1,
+    recover/1
 ]).
 
 -export([
@@ -98,6 +99,12 @@ stop(Agent) ->
         {error, Reason} ->
             {error, Reason}
     end.
+
+-doc("Resumes recovery of a persisted individual node execution.").
+-spec recover(gen_server:server_ref()) ->
+    {ok, reference()} | {error, term()}.
+recover(Agent) ->
+    gen_server:call(Agent, recover, 5000).
 
 -doc(false).
 -spec init(config()) -> {ok, #agent_state{}} | {stop, term()}.
@@ -188,6 +195,24 @@ handle_call(get_result, _From, State) ->
     {reply, {error, no_result}, State};
 handle_call(get_supervisor_pid, _From, State) ->
     {reply, {ok, State#agent_state.supervisor_pid}, State};
+handle_call(recover, _From,
+    #agent_state{
+        status = recovery_required,
+        active_execution = #{
+            node_id := NodeId,
+            execution_id := ExecutionId,
+            node_input := NodeInput
+        }
+    } = State
+) ->
+    recover_node_execution(
+        NodeId,
+        ExecutionId,
+        NodeInput,
+        State
+    );
+handle_call(recover, _From, State) ->
+    {reply, {error, recovery_not_required}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -1187,4 +1212,74 @@ inspect_recovery_task(AgentId, ExecutionId) ->
             task_execution_uncertain;
         {error, Reason} ->
             {inspection_error, Reason}
+    end.
+
+-spec recover_node_execution(
+    atom(),
+    reference(),
+    map(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_node_execution(NodeId, ExecutionId, NodeInput, State) ->
+    TaskKey = {
+        State#agent_state.id,
+        ExecutionId,
+        node_result
+    },
+    case hayata_task_store:inspect_task(TaskKey) of
+        {error, task_execution_uncertain} ->
+            {reply, {error, task_execution_uncertain}, State};
+        {error, Reason} ->
+            {reply, {error, {task_inspection_failed, Reason}}, State};
+        {ok, TaskStatus} ->
+            recover_inspected_node_execution(
+                NodeId,
+                ExecutionId,
+                NodeInput,
+                TaskStatus,
+                State
+            )
+    end.
+
+-spec recover_inspected_node_execution(
+    atom(),
+    reference(),
+    map(),
+    not_started | {completed, term()},
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+recover_inspected_node_execution(NodeId, ExecutionId, NodeInput, _TaskStatus, State) ->
+    case {
+        maps:find(NodeId, State#agent_state.nodes),
+        hayata_node:whereis(State#agent_state.id, NodeId)
+    } of
+        {{ok, NodeFun}, NodePid} when is_pid(NodePid) ->
+            Task = fun() -> execute_node(NodeFun, NodeInput) end,
+            case hayata_node:recover_execution(
+                NodePid,
+                ExecutionId,
+                [{node_result, Task}],
+                State#agent_state.execution_timeout,
+                isolated,
+                self()
+            ) of
+                {ok, ExecutionId} ->
+                    RecoveredState = State#agent_state{
+                        status = running,
+                        invocation_start_time = erlang:monotonic_time(),
+                        timeout_ref = undefined
+                    },
+                    case persist_invocation_checkpoint(RecoveredState) of
+                        ok ->
+                            {reply, {ok, ExecutionId}, RecoveredState};
+                        {error, Reason} ->
+                            {reply, {error, {checkpoint_save_failed, Reason}}, State}
+                    end;
+                {error, Reason} ->
+                    {reply, {error, Reason}, State}
+            end;
+        {error, _NodePid} ->
+            {reply, {error, {unknown_node, NodeId}}, State};
+        {{ok, _NodeFun}, undefined} ->
+            {reply, {error, {node_not_running, NodeId}}, State}
     end.
