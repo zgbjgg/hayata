@@ -875,6 +875,7 @@ start_parallel_node_executions(NodeIds, Input, State) ->
         State
     ).
 
+
 -spec start_parallel_node_executions(
     [atom()],
     term(),
@@ -882,15 +883,17 @@ start_parallel_node_executions(NodeIds, Input, State) ->
     #agent_state{}
 ) -> {ok, #agent_state{}} | {error, term(), #agent_state{}}.
 start_parallel_node_executions([], _Input, Transition, State) ->
-    {ok, State#agent_state{
+    UpdatedState = State#agent_state{
         active_execution = Transition
-    }};
-start_parallel_node_executions(
-    [NodeId | Rest],
-    Input,
-    Transition,
-    State
-) ->
+    },
+    case persist_invocation_checkpoint(UpdatedState) of
+        ok ->
+            {ok, UpdatedState};
+        {error, Reason} ->
+            FailedState = fail_invocation(Reason, UpdatedState),
+            {error, Reason, FailedState}
+    end;
+start_parallel_node_executions([NodeId | Rest], Input, Transition, State) ->
     NodeFun = maps:get(NodeId, State#agent_state.nodes),
     NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
     ExecutionId = make_ref(),
@@ -898,41 +901,43 @@ start_parallel_node_executions(
     Task = fun() -> execute_node(NodeFun, NodeInput) end,
     StartExecution = State#agent_state.execution_starter,
 
-    case StartExecution(
-        NodePid,
+    Pending = maps:put(
+        NodeId,
         ExecutionId,
-        [{node_result, Task}],
-        30000,
-        parallel,
-        self()
-    ) of
-        {ok, ExecutionId} ->
-            Pending = maps:put(
-                NodeId,
-                ExecutionId,
-                maps:get(pending, Transition)
-            ),
-            UpdatedTransition = Transition#{pending => Pending},
-            UpdatedState = State#agent_state{
-                current_step = State#agent_state.current_step + 1
-            },
-            start_parallel_node_executions(
-                Rest,
-                Input,
-                UpdatedTransition,
-                UpdatedState
-            );
-        {error, Reason} ->
-            Error = {node_execution_start_failed, NodeId, Reason},
-            FailedTransition = Transition#{
-                pending => maps:get(pending, Transition)
-            },
-            FailedState = State#agent_state{
-                active_execution = FailedTransition
-            },
-            {error, Error, fail_invocation(Error, FailedState)}
-    end.
+        maps:get(pending, Transition)
+    ),
+    UpdatedTransition = Transition#{pending => Pending},
+    PlannedState = State#agent_state{
+        current_step = State#agent_state.current_step + 1,
+        active_execution = UpdatedTransition
+    },
 
+    case persist_invocation_checkpoint(PlannedState) of
+        ok ->
+            case StartExecution(
+                NodePid,
+                ExecutionId,
+                [{node_result, Task}],
+                30000,
+                parallel,
+                self()
+            ) of
+                {ok, ExecutionId} ->
+                    start_parallel_node_executions(
+                        Rest,
+                        Input,
+                        UpdatedTransition,
+                        PlannedState
+                    );
+                {error, Reason} ->
+                    Error = {node_execution_start_failed, NodeId, Reason},
+                    FailedState = fail_invocation(Error, PlannedState),
+                    {error, Error, FailedState}
+            end;
+        {error, Reason} ->
+            FailedState = fail_invocation(Reason, PlannedState),
+            {error, Reason, FailedState}
+    end.
 
 -spec create_invocation_checkpoint(#agent_state{}) ->
     ok | {error, term()}.
