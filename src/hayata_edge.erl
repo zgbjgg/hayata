@@ -119,7 +119,7 @@ handle_call(_Request, _From, State) ->
 
 -doc(false).
 -spec handle_cast(term(), #edge_state{}) ->
-    {noreply, #edge_state{}}.
+    {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
 handle_cast(start, State) ->
     StartedAt = erlang:monotonic_time(),
     StartedState = State#edge_state{started_at = StartedAt},
@@ -140,13 +140,6 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #edge_state{}) ->
     {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
-handle_info({hayata_task_result, TaskKey, Result}, State) ->
-    case TaskKey =:= task_key(State) of
-        true ->
-            finish_edge(Result, State);
-        false ->
-            {noreply, State}
-    end;
 handle_info(_Info, State) ->
     {noreply, State}.
 
