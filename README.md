@@ -310,45 +310,19 @@ lifecycle events from agents, nodes, edges, and reducers. Applications
 can attach handlers to collect metrics, trace execution activity, or
 integrate with monitoring systems.
 
-  ----------------------------------------------------------------------------------------------
-  Component               Event                                          Meaning
-  ----------------------- ---------------------------------------------- -----------------------
-  Agent                   `[:hayata, :agent, :invocation, :start]`       An invocation starts.
-
-  Agent                   `[:hayata, :agent, :invocation, :stop]`        An invocation completes
-                                                                         or fails normally.
-
-  Agent                   `[:hayata, :agent, :invocation, :exception]`   An invocation
-                                                                         encounters a caught
-                                                                         policy exception.
-
-  Node                    `[:hayata, :node, :execution, :start]`         A node execution
-                                                                         starts.
-
-  Node                    `[:hayata, :node, :execution, :stop]`          A node execution
-                                                                         reaches a terminal
-                                                                         state, such as
-                                                                         completion or
-                                                                         cancellation.
-
-  Node                    `[:hayata, :node, :execution, :exception]`     A node execution ends
-                                                                         with a reducer recovery
-                                                                         failure.
-
-  Edge                    `[:hayata, :edge, :start]`                     An edge task starts.
-
-  Edge                    `[:hayata, :edge, :stop]`                      An edge task ends
-                                                                         without a caught task
-                                                                         exception.
-
-  Edge                    `[:hayata, :edge, :exception]`                 An edge task raises a
-                                                                         caught exception.
-
-  Reducer                 `[:hayata, :reducer, :start]`                  A reducer is activated.
-
-  Reducer                 `[:hayata, :reducer, :stop]`                   A reducer completes or
-                                                                         times out.
-  ----------------------------------------------------------------------------------------------
+| Component | Event | Meaning |
+|---|---|---|
+| Agent | `[hayata, agent, invocation, start]` | An invocation starts. |
+| Agent | `[hayata, agent, invocation, stop]` | An invocation completes or fails normally. |
+| Agent | `[hayata, agent, invocation, exception]` | An invocation encounters a caught policy exception. |
+| Node | `[hayata, node, execution, start]` | A node execution starts. |
+| Node | `[hayata, node, execution, stop]` | A node execution reaches a terminal state, such as completion or cancellation. |
+| Node | `[hayata, node, execution, exception]` | A node execution ends with a reducer recovery failure. |
+| Edge | `[hayata, edge, start]` | An edge task starts. |
+| Edge | `[hayata, edge, stop]` | An edge task ends without a caught task exception. |
+| Edge | `[hayata, edge, exception]` | An edge task raises a caught exception. |
+| Reducer | `[hayata, reducer, start]` | A reducer is activated. |
+| Reducer | `[hayata, reducer, stop]` | A reducer completes or times out. |
 
 A `stop` event indicates a terminal outcome, not necessarily success.
 Where present, use the `status` metadata to distinguish completed,
@@ -422,18 +396,6 @@ processing messages until the callback returns. The watcher can
 terminate the edge when the node disappears, but cancellation semantics
 for blocked tasks and their side effects remain an area for further
 review.
-
-## Release scope: 1.0.0
-
-The planned 1.0.0 release brings together the graph-based agent runtime,
-sequential and parallel execution, OTP supervision, Telemetry lifecycle
-events, durable invocation/task checkpoints, and explicit recovery
-handling for completed, not-started, and uncertain tasks.
-
-The release should be considered ready only after the complete EUnit
-suite, compilation, package validation, and review of the final release
-commit have succeeded. The manual VM recovery procedures are documented
-in `VM_RECOVERY_TESTS.md`.
 
 ## Design principles
 
