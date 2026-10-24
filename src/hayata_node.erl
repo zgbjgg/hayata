@@ -15,7 +15,8 @@
     start_execution/4,
     start_execution/5,
     start_execution/6,
-    cancel_execution/2
+    cancel_execution/2,
+    recover_execution/6
 ]).
 
 -export([
@@ -189,6 +190,27 @@ start_execution(
 cancel_execution(Node, ExecutionId) ->
     gen_server:call(Node, {cancel_execution, ExecutionId}).
 
+-doc("Recovers an execution and notifies a recipient of its result.").
+-spec recover_execution(
+    gen_server:server_ref(),
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    isolated | parallel,
+    pid()
+) -> {ok, term()} | {error, term()}.
+recover_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, Type, RecipientPid) when is_pid(RecipientPid) ->
+    gen_server:call(
+        Node,
+        {
+            recover_execution,
+            ExecutionId,
+            EdgeTasks,
+            TimeoutMs,
+            Type,
+            RecipientPid
+        }
+    ).
 %% gen_server callbacks
 
 -doc(false).
@@ -255,9 +277,14 @@ handle_call({track_edge, EdgeId, EdgePid}, _From, State) ->
 handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
     case hayata_edge:start(
         self(),
+        undefined,
         EdgeId,
         ExecutionId,
-        TaskFun
+        TaskFun,
+        #{
+            agent_id => State#node_state.agent_id,
+            node_id => State#node_state.node_id
+        }
     ) of
         {ok, EdgePid} ->
             MonitorRef = erlang:monitor(process, EdgePid),
@@ -314,6 +341,16 @@ handle_call({cancel_execution, ExecutionId}, _From, State) ->
         {error, Reason, NewState} ->
             {reply, {error, Reason}, NewState}
     end;
+handle_call({recover_execution, ExecutionId, EdgeTasks, TimeoutMs, Type, RecipientPid}, _From, State)
+    when (Type =:= isolated orelse Type =:= parallel), is_pid(RecipientPid) ->
+    recover_execution_request(
+        ExecutionId,
+        EdgeTasks,
+        TimeoutMs,
+        Type,
+        RecipientPid,
+        State
+    );
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -613,7 +650,11 @@ start_execution_edge(
         ReducerPid,
         EdgeId,
         ExecutionId,
-        TaskFun
+        TaskFun,
+        #{
+            agent_id => State#node_state.agent_id,
+            node_id => State#node_state.node_id
+        }
     ) of
         {ok, EdgePid} ->
             MonitorRef = erlang:monitor(process, EdgePid),
@@ -1335,3 +1376,78 @@ emit_execution_terminal_event(_Status, Measurements, Metadata) ->
         Measurements,
         Metadata
     ).
+
+-spec recover_execution_request(
+    term(),
+    [edge_task()],
+    non_neg_integer(),
+    isolated | parallel,
+    pid(),
+    #node_state{}
+) -> {reply, term(), #node_state{}}.
+recover_execution_request(ExecutionId, EdgeTasks, TimeoutMs, Type, RecipientPid, State) ->
+    case validate_execution(ExecutionId, EdgeTasks, TimeoutMs) of
+        ok ->
+            case maps:find(
+                ExecutionId,
+                State#node_state.executions
+            ) of
+                {ok, Execution} ->
+                    recover_existing_execution(
+                        ExecutionId,
+                        EdgeTasks,
+                        RecipientPid,
+                        Execution,
+                        State
+                    );
+                error ->
+                    start_execution_with_recipient(
+                        ExecutionId,
+                        EdgeTasks,
+                        TimeoutMs,
+                        Type,
+                        RecipientPid,
+                        State
+                    )
+            end;
+        {error, Reason} ->
+            {reply, {error, Reason}, State}
+    end.
+
+-spec recover_existing_execution(
+    term(),
+    [edge_task()],
+    pid(),
+    map(),
+    #node_state{}
+) -> {reply, term(), #node_state{}}.
+recover_existing_execution(ExecutionId, EdgeTasks, RecipientPid, Execution, State) ->
+    ExpectedEdgeIds = edge_ids(EdgeTasks),
+    ExistingEdgeIds = maps:get(edge_ids, Execution, []),
+    case ExpectedEdgeIds =:= ExistingEdgeIds of
+        false ->
+            {reply, {error, recovery_execution_mismatch}, State};
+        true ->
+            UpdatedExecution = Execution#{notify_to => RecipientPid},
+            Executions = maps:put(
+                ExecutionId,
+                UpdatedExecution,
+                State#node_state.executions
+            ),
+            UpdatedState = State#node_state{
+                executions = Executions
+            },
+            case is_terminal_status(
+                maps:get(status, UpdatedExecution)
+            ) of
+                true ->
+                    notify_execution_recipient(
+                        ExecutionId,
+                        UpdatedExecution,
+                        UpdatedState
+                    ),
+                    {reply, {ok, ExecutionId}, UpdatedState};
+                false ->
+                    {reply, {ok, ExecutionId}, UpdatedState}
+            end
+    end.

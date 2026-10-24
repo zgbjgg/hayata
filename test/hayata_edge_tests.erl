@@ -3,6 +3,8 @@
 -include_lib("eunit/include/eunit.hrl").
 
 successful_execution_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_01,
@@ -20,6 +22,8 @@ successful_execution_test() ->
     ?assertEqual(normal, receive_down(MonitorRef, EdgePid)).
 
 controlled_error_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_02,
@@ -40,6 +44,8 @@ controlled_error_test() ->
     ).
 
 exception_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_03,
@@ -62,11 +68,15 @@ exception_test() ->
     ).
 
 abrupt_termination_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     Parent = self(),
+    ExecutionId = make_ref(),
+
     {ok, EdgePid} = hayata_edge:start(
         self(),
         edge_04,
-        execution_04,
+        ExecutionId,
         fun() ->
             Parent ! {task_started, self()},
             receive
@@ -91,6 +101,8 @@ abrupt_termination_test() ->
     ?assertEqual(no_message, receive_optional_message()).
 
 telemetry_emits_start_and_stop_for_successful_execution_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -150,6 +162,8 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
     end.
 
 telemetry_emits_stop_for_controlled_error_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -219,6 +233,8 @@ telemetry_emits_stop_for_controlled_error_test() ->
     end.
 
 telemetry_emits_exception_for_task_exception_test() ->
+    ok = hayata_task_store:ensure_started(),
+
     ok = hayata_test_telemetry:ensure_telemetry_started(),
     {ok, HandlerId} = hayata_test_telemetry:attach(),
 
@@ -279,7 +295,7 @@ telemetry_emits_exception_for_task_exception_test() ->
                         edge_id := edge_telemetry_exception,
                         execution_id := execution_telemetry_exception,
                         class := error
-                    } = Metadata
+                    } = _Metadata
                 }
             ]
             when is_integer(Duration),
@@ -292,6 +308,164 @@ telemetry_emits_exception_for_task_exception_test() ->
         ?assertNot(maps:is_key(stacktrace, Metadata))
     after
         ok = hayata_test_telemetry:detach(HandlerId)
+    end.
+
+completed_checkpoint_is_reused_after_edge_restart_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    Parent = self(),
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+    Metadata = #{agent_id => AgentId},
+    ExpectedResult = {ok, #{processed => true}},
+
+    Task = fun() ->
+        {ok, #{processed => true}}
+    end,
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        Task,
+        Metadata
+    ),
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            ExpectedResult
+        },
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    RetryTask = fun() ->
+        Parent ! {task_reexecuted, self()},
+        {ok, unexpected_result}
+    end,
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        RetryTask,
+        Metadata
+    ),
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            ExpectedResult
+        },
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(SecondMonitor, SecondEdgePid)
+    ),
+
+    receive
+        {task_reexecuted, SecondEdgePid} ->
+            ?assert(false)
+    after 50 ->
+        ok
+    end.
+
+running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    Parent = self(),
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+    Metadata = #{agent_id => AgentId},
+
+    Task = fun() ->
+        Parent ! {task_started, self()},
+        receive
+            continue -> {ok, completed}
+        end
+    end,
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        Task,
+        Metadata
+    ),
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    receive
+        {task_started, FirstEdgePid} -> ok
+    after 1000 ->
+        error(task_start_timeout)
+    end,
+
+    exit(FirstEdgePid, kill),
+
+    ?assertEqual(
+        killed,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    RetryTask = fun() ->
+        Parent ! {task_reexecuted, self()},
+        {ok, unexpected_result}
+    end,
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        RetryTask,
+        Metadata
+    ),
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {
+            hayata_edge_result,
+            EdgeId,
+            ExecutionId,
+            {error, task_execution_uncertain}
+        },
+        receive_message()
+    ),
+
+    ?assertEqual(
+        {edge_failed, task_execution_uncertain},
+        receive_down(SecondMonitor, SecondEdgePid)
+    ),
+
+    receive
+        {task_reexecuted, SecondEdgePid} ->
+            ?assert(false)
+    after 50 ->
+        ok
     end.
 
 receive_message() ->

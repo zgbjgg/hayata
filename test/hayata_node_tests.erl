@@ -2255,7 +2255,16 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
                 error(node_execution_timeout)
             end,
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {hayata_telemetry_event, _Name, _Measurements,
@@ -2342,7 +2351,16 @@ telemetry_emits_stop_for_cancelled_execution_test() ->
             ),
             ?assertEqual(cancelled, maps:get(status, Execution)),
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {hayata_telemetry_event, _Name, _Measurements,
@@ -2452,7 +2470,16 @@ telemetry_emits_exception_for_reducer_recovery_failure_test() ->
                 maps:get(status, Execution)
             ),
 
-            Events = hayata_test_telemetry:events(),
+            Events = [
+                Event
+                || Event = {
+                    hayata_telemetry_event,
+                    [hayata, node, execution, _],
+                    _Measurements,
+                    _Metadata
+                } <- hayata_test_telemetry:events()
+            ],
+
             NodeEvents = [
                 Event
                 || Event = {
@@ -2548,6 +2575,130 @@ start_execution_defaults_to_isolated_type_test() ->
         ?assertEqual(isolated, maps:get(type, Execution))
     end).
 
+recover_completed_execution_notifies_recipient_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = make_ref(),
+        EdgeTasks = [
+            {node_result, fun() -> {ok, #{answer => 42}} end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            1000
+        ),
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:recover_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                1000,
+                isolated,
+                self()
+            )
+        ),
+
+        receive
+            {hayata_node_execution, think_01, ExecutionId, Execution} ->
+                ?assertEqual(completed, maps:get(status, Execution)),
+                ?assertEqual(
+                    {ok, #{answer => 42}},
+                    maps:get(
+                        node_result,
+                        maps:get(results, Execution)
+                    )
+                )
+        after 1000 ->
+            error(recovered_execution_notification_timeout)
+        end
+    end).
+
+recover_active_execution_updates_recipient_test() ->
+    Parent = self(),
+    Runs = atomics:new(1, []),
+
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = make_ref(),
+        Task = fun() ->
+            atomics:add(Runs, 1, 1),
+            Parent ! {recovery_task_started, self()},
+            receive
+                continue -> {ok, active_result}
+            end
+        end,
+        EdgeTasks = [{node_result, Task}],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            EdgeTasks,
+            3000
+        ),
+
+        EdgePid = receive
+            {recovery_task_started, Pid} -> Pid
+        after 1000 ->
+            error(recovery_task_start_timeout)
+        end,
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_node:recover_execution(
+                Node,
+                ExecutionId,
+                EdgeTasks,
+                3000,
+                isolated,
+                self()
+            )
+        ),
+
+        EdgePid ! continue,
+
+        receive
+            {hayata_node_execution, think_01, ExecutionId, Execution} ->
+                ?assertEqual(completed, maps:get(status, Execution))
+        after 2000 ->
+            error(recovered_active_execution_notification_timeout)
+        end,
+
+        ?assertEqual(1, atomics:get(Runs, 1))
+    end).
+
+recover_execution_rejects_edge_mismatch_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ExecutionId = make_ref(),
+        OriginalTasks = [
+            {node_result, fun() -> {ok, original_result} end}
+        ],
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            Node,
+            ExecutionId,
+            OriginalTasks,
+            1000
+        ),
+
+        await_execution_completed(Node, ExecutionId, 200),
+
+        ?assertEqual(
+            {error, recovery_execution_mismatch},
+            hayata_node:recover_execution(
+                Node,
+                ExecutionId,
+                [{different_edge, fun() -> {ok, wrong_result} end}],
+                1000,
+                isolated,
+                self()
+            )
+        )
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
@@ -2564,6 +2715,8 @@ await_edge_down(Node, Attempts) ->
     end.
 
 with_node(AgentId, NodeId, Name, InitialState, Edges, TestFun) ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, Node} = hayata_node:start_link(
         AgentId,
         NodeId,

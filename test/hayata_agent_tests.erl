@@ -1705,14 +1705,37 @@ parallel_start_failure_cancels_started_branches_test() ->
         Count = counters:get(Counter, 1),
         case Count of
             1 ->
-                hayata_node:start_execution(
+                Result = hayata_node:start_execution(
                     NodePid,
                     ExecutionId,
                     EdgeTasks,
                     TimeoutMs,
                     Type,
                     RecipientPid
-                );
+                ),
+                case Result of
+                    {ok, ExecutionId} ->
+                        Info = hayata_node:get_info(NodePid),
+                        ActiveEdges = maps:values(
+                            maps:get(active_edges, Info)
+                        ),
+                        case [
+                            Pid
+                            || #{
+                                execution_id := ActiveExecutionId,
+                                pid := Pid
+                            } <- ActiveEdges,
+                            ActiveExecutionId =:= ExecutionId
+                        ] of
+                            [BranchPid | _] ->
+                                Parent ! {branch_started, BranchPid};
+                            [] ->
+                                ok
+                        end,
+                        Result;
+                    _ ->
+                        Result
+                end;
             2 ->
                 {error, injected_start_failure}
         end
@@ -1723,7 +1746,6 @@ parallel_start_failure_cancels_started_branches_test() ->
         state => #{original => true},
         nodes => #{
             first => fun(_State) ->
-                Parent ! {branch_started, self()},
                 receive
                     continue -> #{partial => true}
                 end
@@ -1947,6 +1969,1220 @@ telemetry_emits_stop_when_node_execution_start_fails_test() ->
         ok = hayata_test_telemetry:detach(HandlerId)
     end.
 
+restores_active_invocation_without_reexecuting_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 2},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_State) ->
+                error(node_must_not_execute_during_recovery)
+            end
+        },
+        decision_policy => fun(_Context) ->
+            {finish, unexpected}
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        ),
+        ?assertEqual(
+            InvocationId,
+            maps:get(invocation_id, Info)
+        ),
+        ?assertEqual(
+            ActiveExecution,
+            maps:get(active_execution, Info)
+        ),
+        ?assertEqual(
+            #{progress => 2},
+            hayata_agent:get_state(Agent)
+        ),
+        ?assertEqual(
+          #{work => not_started},
+          maps:get(recovery_tasks, Info)
+        ),
+        ?assertEqual(
+            {error, recovery_required},
+            hayata_agent:run(Agent, new_input)
+        ),
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        )
+    end).
+
+inspects_completed_task_during_recovery_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId
+    },
+    Result = {ok, #{answer => 42}},
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, ExecutionId, node_result},
+        Result
+    ),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{work => fun(_State) -> error(unexpected_execution) end},
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            #{work => {completed, Result}},
+            maps:get(recovery_tasks, Info)
+        ),
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        )
+    end).
+
+inspects_parallel_tasks_during_recovery_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    FirstResult = {ok, #{first => done}},
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [first, second],
+        pending => #{
+            first => FirstExecutionId,
+            second => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{},
+        current_step => 2,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, FirstExecutionId, node_result},
+        FirstResult
+    ),
+    {ok, execute} = hayata_task_store:claim_task(
+        {AgentId, SecondExecutionId, node_result},
+        #{}
+    ),
+
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            first => fun(_State) -> error(unexpected_execution) end,
+            second => fun(_State) -> error(unexpected_execution) end
+        },
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            #{
+                first => {completed, FirstResult},
+                second => task_execution_uncertain
+            },
+            maps:get(recovery_tasks, Info)
+        ),
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        )
+    end).
+
+recovers_not_started_task_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(Input) ->
+                Parent ! {node_executed, self(), Input},
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        receive
+            {node_executed, _NodePid, NodeInput} ->
+                ok
+        after 2000 ->
+            error(node_was_not_executed)
+        end,
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{progress => 1, recovered => true}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+recovers_completed_task_without_reexecution_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    StoredResult = {ok, #{recovered => true}},
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! node_must_not_execute_again,
+                error(unexpected_reexecution)
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, ExecutionId, node_result},
+        StoredResult
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{progress => 1, recovered => true}},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            node_must_not_execute_again ->
+                error(completed_task_was_reexecuted)
+        after 100 ->
+            ok
+        end
+    end).
+
+rejects_uncertain_task_recovery_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! uncertain_task_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    {ok, execute} = hayata_task_store:claim_task(
+        {AgentId, ExecutionId, node_result},
+        #{}
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {error, task_execution_uncertain},
+            hayata_agent:recover(Agent)
+        ),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        receive
+            uncertain_task_must_not_execute ->
+                error(uncertain_task_was_reexecuted)
+        after 100 ->
+            ok
+        end
+    end).
+
+rejects_recovery_when_node_is_not_running_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, SupervisorPid} = gen_server:call(
+            Agent,
+            get_supervisor_pid
+        ),
+        {ok, NodeSupPid} = hayata_agent_sup:node_supervisor(
+            SupervisorPid
+        ),
+
+        ok = hayata_node_sup:stop_node(
+            NodeSupPid,
+            work
+        ),
+
+        ?assertEqual(
+            undefined,
+            hayata_node:whereis(AgentId, work)
+        ),
+
+        ?assertEqual(
+            {error, {node_not_running, work}},
+            hayata_agent:recover(Agent)
+        ),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            node_must_not_execute ->
+                error(node_executed_without_recovery_target)
+        after 100 ->
+            ok
+        end
+    end).
+
+rejects_recovery_when_checkpoint_persistence_fails_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        {atomic, ok} = mnesia:change_table_access_mode(
+            hayata_invocation_checkpoint,
+            read_only
+        ),
+
+        try
+            ?assertMatch(
+                {error, {checkpoint_save_failed, _}},
+                hayata_agent:recover(Agent)
+            ),
+
+            ?assertEqual(
+                recovery_required,
+                maps:get(status, hayata_agent:get_info(Agent))
+            ),
+
+            receive
+                node_must_not_execute ->
+                    error(node_executed_after_checkpoint_failure)
+            after 100 ->
+                ok
+            end
+        after
+            {atomic, ok} = mnesia:change_table_access_mode(
+                hayata_invocation_checkpoint,
+                read_write
+            )
+        end
+    end).
+
+rejects_recovery_mismatch_without_stale_checkpoint_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! recovered_node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        NodePid = hayata_node:whereis(AgentId, work),
+        BlockedTask = fun() ->
+            Parent ! conflicting_execution_started,
+            receive
+                continue_conflicting_execution -> ok
+            end
+        end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            NodePid,
+            ExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        receive
+            conflicting_execution_started -> ok
+        after 2000 ->
+            error(conflicting_execution_did_not_start)
+        end,
+
+        ?assertEqual(
+            {error, recovery_execution_mismatch},
+            hayata_agent:recover(Agent)
+        ),
+
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        ),
+
+        {ok, PersistedCheckpoint} =
+            hayata_task_store:get_invocation(
+                AgentId,
+                InvocationId
+            ),
+
+        ?assertEqual(
+            running,
+            maps:get(status, PersistedCheckpoint)
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            recovered_node_must_not_execute ->
+                error(node_executed_after_recovery_mismatch)
+        after 100 ->
+            ok
+        end,
+
+        NodePid ! continue_conflicting_execution
+    end).
+
+rejects_recovery_when_checkpoint_rollback_fails_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! recovered_node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        NodePid = hayata_node:whereis(AgentId, work),
+        BlockedTask = fun() ->
+            Parent ! conflicting_execution_started,
+            receive
+                continue_conflicting_execution -> ok
+            end
+        end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            NodePid,
+            ExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        receive
+            conflicting_execution_started -> ok
+        after 2000 ->
+            error(conflicting_execution_did_not_start)
+        end,
+
+        {ok, InitialCheckpoint} =
+            hayata_task_store:get_invocation(
+                AgentId,
+                InvocationId
+            ),
+        InitialUpdatedAt = maps:get(
+            updated_at,
+            InitialCheckpoint
+        ),
+
+        %% Hold the node until the intermediate checkpoint is saved.
+        timer:sleep(10),
+        ok = sys:suspend(NodePid),
+
+        spawn(fun() ->
+            Parent ! {
+                recovery_result,
+                hayata_agent:recover(Agent)
+            }
+        end),
+
+        try
+            _UpdatedCheckpoint = await_checkpoint_update(
+                AgentId,
+                InvocationId,
+                InitialUpdatedAt,
+                200
+            ),
+
+            %% The running checkpoint is saved; force rollback to fail.
+            {atomic, ok} = mnesia:change_table_access_mode(
+                hayata_invocation_checkpoint,
+                read_only
+            ),
+
+            ok = sys:resume(NodePid),
+
+            receive
+                {recovery_result, Result} ->
+                    ?assertMatch(
+                        {
+                            error,
+                            {
+                                recovery_failed_checkpoint_rollback_failed,
+                                recovery_execution_mismatch,
+                                _
+                            }
+                        },
+                        Result
+                    )
+            after 2000 ->
+                error(recovery_result_timeout)
+            end,
+
+            ?assertEqual(
+                recovery_required,
+                maps:get(status, hayata_agent:get_info(Agent))
+            ),
+
+            %% Rollback failed, so the intermediate checkpoint remains.
+            {ok, PersistedCheckpoint} =
+                hayata_task_store:get_invocation(
+                    AgentId,
+                    InvocationId
+                ),
+
+            ?assertEqual(
+                running,
+                maps:get(status, PersistedCheckpoint)
+            ),
+
+            ?assertEqual(
+                {error, no_result},
+                hayata_agent:get_result(Agent)
+            ),
+
+            receive
+                recovered_node_must_not_execute ->
+                    error(node_executed_after_recovery_failure)
+            after 100 ->
+                ok
+            end
+        after
+            _ = sys:resume(NodePid),
+            {atomic, ok} = mnesia:change_table_access_mode(
+                hayata_invocation_checkpoint,
+                read_write
+            ),
+            NodePid ! continue_conflicting_execution
+        end
+    end).
+
+recovers_parallel_execution_with_not_started_branch_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [work],
+        node_input => #{progress => 1, input => original_input},
+        pending => #{work => ExecutionId},
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_State) ->
+                Parent ! {parallel_branch_executed, self()},
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            #{work => not_started},
+            maps:get(recovery_tasks, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        receive
+            {parallel_branch_executed, _Pid} ->
+                ok
+        after 2000 ->
+            error(parallel_branch_recovery_timeout)
+        end,
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, [#{recovered => true}]},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+recovers_parallel_execution_with_multiple_not_started_branches_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [alpha, beta],
+        node_input => #{
+            progress => 1,
+            input => original_input
+        },
+        pending => #{
+            alpha => FirstExecutionId,
+            beta => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            alpha => fun(_State) ->
+                Parent ! {parallel_branch_executed, alpha},
+                #{alpha => recovered}
+            end,
+            beta => fun(_State) ->
+                Parent ! {parallel_branch_executed, beta},
+                #{beta => recovered}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            #{alpha => not_started, beta => not_started},
+            maps:get(recovery_tasks, hayata_agent:get_info(Agent))
+        ),
+
+        ?assertMatch({ok, _}, hayata_agent:recover(Agent)),
+
+        ExecutedBranches = [
+            receive
+                {parallel_branch_executed, NodeId} ->
+                    NodeId
+            after 2000 ->
+                error(parallel_branch_recovery_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [alpha, beta],
+            lists:sort(ExecutedBranches)
+        ),
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, [
+                #{alpha => recovered},
+                #{beta => recovered}
+            ]},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+cancels_started_parallel_recovery_branches_on_failure_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    FirstExecutionId = make_ref(),
+    SecondExecutionId = make_ref(),
+    ActiveExecution = #{
+        type => parallel,
+        node_ids => [alpha, beta],
+        node_input => #{
+            progress => 1,
+            input => original_input
+        },
+        pending => #{
+            alpha => FirstExecutionId,
+            beta => SecondExecutionId
+        },
+        results => #{}
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            alpha => fun(_State) ->
+                Parent ! {alpha_branch_started, self()},
+                receive
+                    continue_alpha ->
+                        #{alpha => recovered}
+                end
+            end,
+            beta => fun(_State) ->
+                Parent ! beta_should_not_execute,
+                #{beta => unexpected}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(parallel_results, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        BetaPid = hayata_node:whereis(AgentId, beta),
+        BlockedTask = fun() ->
+            Parent ! {conflicting_beta_execution_started, self()},
+            receive
+                 continue_conflicting_beta_execution -> ok
+            end
+        end,
+
+        {ok, SecondExecutionId} = hayata_node:start_execution(
+            BetaPid,
+            SecondExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        BlockedTaskPid = receive
+            {conflicting_beta_execution_started, Pid} ->
+                Pid
+        after 2000 ->
+            error(conflicting_beta_execution_did_not_start)
+        end,
+
+        ?assertEqual(
+            {error, {
+                parallel_node_recovery_failed,
+                beta,
+                recovery_execution_mismatch
+            }},
+            hayata_agent:recover(Agent)
+        ),
+
+        %% Alpha may be cancelled before its task function starts.
+        %% Verify the execution state instead of relying on a message
+        %% sent from inside the task function.
+        AlphaPid = hayata_node:whereis(AgentId, alpha),
+        AlphaInfo = hayata_node:get_info(AlphaPid),
+        AlphaExecution = maps:get(
+            FirstExecutionId,
+            maps:get(executions, AlphaInfo)
+        ),
+
+        ?assertEqual(
+            cancelled,
+            maps:get(status, AlphaExecution)
+        ),
+
+        RemainingAlphaEdges = [
+            Edge
+            || Edge <- maps:values(maps:get(active_edges, AlphaInfo)),
+               maps:get(execution_id, Edge) =:= FirstExecutionId
+        ],
+
+        ?assertEqual([], RemainingAlphaEdges),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        %% The persisted checkpoint should be restored to its
+        %% pre-recovery status rather than left as running.
+        {ok, PersistedCheckpoint} = hayata_task_store:get_invocation(
+            AgentId,
+            InvocationId
+        ),
+
+        ?assertEqual(
+            running,
+            maps:get(status, PersistedCheckpoint)
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            beta_should_not_execute ->
+                error(beta_node_executed_despite_recovery_failure)
+        after 100 ->
+            ok
+        end,
+
+        %% Release the deliberately blocked conflicting execution.
+        BetaPid ! continue_conflicting_beta_execution,
+        BlockedTaskPid ! continue_conflicting_beta_execution
+    end).
+
+restores_active_invocation_after_supervisor_restart_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{input => original_input, progress => 1},
+    ActiveExecution = #{
+        node_id => alpha,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        agent_id => AgentId,
+        invocation_id => InvocationId,
+        status => running,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution
+    },
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            alpha => fun(_Input) ->
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    {ok, FirstSup} = hayata_agent_sup:start_link(Config),
+    unlink(FirstSup),
+    {ok, FirstAgent} = hayata_agent_sup:agent(FirstSup),
+
+    try
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(FirstAgent))
+        )
+    after
+        FirstSupMonitor = erlang:monitor(process, FirstSup),
+        exit(FirstSup, shutdown),
+
+        receive
+            {'DOWN', FirstSupMonitor, process, FirstSup, _Reason} ->
+                ok
+        after 5000 ->
+           error(first_supervisor_shutdown_timeout)
+        end
+    end,
+
+    {ok, SecondSup} = hayata_agent_sup:start_link(Config),
+    unlink(SecondSup),
+
+    try
+        {ok, SecondAgent} = hayata_agent_sup:agent(SecondSup),
+        Info = hayata_agent:get_info(SecondAgent),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        ),
+        ?assertEqual(
+            InvocationId,
+            maps:get(invocation_id, Info)
+        ),
+        ?assertEqual(
+            ActiveExecution,
+            maps:get(active_execution, Info)
+        ),
+        ?assertEqual(
+            #{progress => 1},
+            hayata_agent:get_state(SecondAgent)
+        )
+    after
+        exit(SecondSup, shutdown)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -1962,6 +3198,8 @@ await_terminal_status(Agent, Attempts) ->
     end.
 
 with_agent(Config, TestFun) ->
+    ok = hayata_task_store:ensure_started(),
+
     {ok, SupPid} = hayata_agent_sup:start_link(Config),
     unlink(SupPid),
     try
@@ -1997,4 +3235,25 @@ await_new_node(AgentId, NodeId, OldPid, Attempts) ->
                 OldPid,
                 Attempts - 1
             )
+    end.
+
+await_checkpoint_update(_AgentId, _InvocationId, _PreviousUpdatedAt, 0) ->
+    error(checkpoint_update_timeout);
+await_checkpoint_update(AgentId, InvocationId, PreviousUpdatedAt, Attempts) ->
+    case hayata_task_store:get_invocation(AgentId, InvocationId) of
+        {ok, Checkpoint} ->
+            case maps:get(updated_at, Checkpoint) =/= PreviousUpdatedAt of
+                true ->
+                    Checkpoint;
+                false ->
+                    timer:sleep(10),
+                    await_checkpoint_update(
+                        AgentId,
+                        InvocationId,
+                        PreviousUpdatedAt,
+                        Attempts - 1
+                    )
+            end;
+        {error, Reason} ->
+            error({checkpoint_read_failed, Reason})
     end.

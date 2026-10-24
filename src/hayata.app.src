@@ -1,6 +1,6 @@
 {application, hayata, [
     {description, "An Erlang/OTP framework for building AI agents."},
-    {vsn, "0.3.0"},
+    {vsn, "1.0.0"},
     {registered, [
         hayata_sup
     ]},
