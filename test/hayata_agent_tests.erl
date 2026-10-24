@@ -3090,6 +3090,93 @@ cancels_started_parallel_recovery_branches_on_failure_test() ->
         BlockedTaskPid ! continue_conflicting_beta_execution
     end).
 
+restores_active_invocation_after_supervisor_restart_test() ->
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{input => original_input, progress => 1},
+    ActiveExecution = #{
+        node_id => alpha,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        agent_id => AgentId,
+        invocation_id => InvocationId,
+        status => running,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution
+    },
+    Config = #{
+        id => AgentId,
+        state => #{},
+        nodes => #{
+            alpha => fun(_Input) ->
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    {ok, FirstSup} = hayata_agent_sup:start_link(Config),
+    unlink(FirstSup),
+    {ok, FirstAgent} = hayata_agent_sup:agent(FirstSup),
+
+    try
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(FirstAgent))
+        )
+    after
+        FirstSupMonitor = erlang:monitor(process, FirstSup),
+        exit(FirstSup, shutdown),
+
+        receive
+            {'DOWN', FirstSupMonitor, process, FirstSup, _Reason} ->
+                ok
+        after 5000 ->
+           error(first_supervisor_shutdown_timeout)
+        end
+    end,
+
+    {ok, SecondSup} = hayata_agent_sup:start_link(Config),
+    unlink(SecondSup),
+
+    try
+        {ok, SecondAgent} = hayata_agent_sup:agent(SecondSup),
+        Info = hayata_agent:get_info(SecondAgent),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        ),
+        ?assertEqual(
+            InvocationId,
+            maps:get(invocation_id, Info)
+        ),
+        ?assertEqual(
+            ActiveExecution,
+            maps:get(active_execution, Info)
+        ),
+        ?assertEqual(
+            #{progress => 1},
+            hayata_agent:get_state(SecondAgent)
+        )
+    after
+        exit(SecondSup, shutdown)
+    end.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
