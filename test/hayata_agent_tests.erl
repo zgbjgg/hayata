@@ -2160,6 +2160,211 @@ inspects_parallel_tasks_during_recovery_test() ->
         )
     end).
 
+recovers_not_started_task_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(Input) ->
+                Parent ! {node_executed, self(), Input},
+                #{recovered => true}
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        receive
+            {node_executed, _NodePid, NodeInput} ->
+                ok
+        after 2000 ->
+            error(node_was_not_executed)
+        end,
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{progress => 1, recovered => true}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+recovers_completed_task_without_reexecution_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    StoredResult = {ok, #{recovered => true}},
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! node_must_not_execute_again,
+                error(unexpected_reexecution)
+            end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    ok = hayata_task_store:save_task_result(
+        {AgentId, ExecutionId, node_result},
+        StoredResult
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {ok, ExecutionId},
+            hayata_agent:recover(Agent)
+        ),
+
+        await_status(Agent, completed, 300),
+
+        ?assertEqual(
+            {ok, #{progress => 1, recovered => true}},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            node_must_not_execute_again ->
+                error(completed_task_was_reexecuted)
+        after 100 ->
+            ok
+        end
+    end).
+
+rejects_uncertain_task_recovery_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! uncertain_task_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+    {ok, execute} = hayata_task_store:claim_task(
+        {AgentId, ExecutionId, node_result},
+        #{}
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        ?assertEqual(
+            {error, task_execution_uncertain},
+            hayata_agent:recover(Agent)
+        ),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, hayata_agent:get_info(Agent))
+        ),
+
+        receive
+            uncertain_task_must_not_execute ->
+                error(uncertain_task_was_reexecuted)
+        after 100 ->
+            ok
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
