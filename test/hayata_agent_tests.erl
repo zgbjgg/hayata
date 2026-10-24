@@ -2524,6 +2524,111 @@ rejects_recovery_when_checkpoint_persistence_fails_test() ->
         end
     end).
 
+rejects_recovery_mismatch_without_stale_checkpoint_test() ->
+    Parent = self(),
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+    ExecutionId = make_ref(),
+    NodeInput = #{
+        progress => 1,
+        input => selected_input
+    },
+    ActiveExecution = #{
+        node_id => work,
+        execution_id => ExecutionId,
+        node_input => NodeInput
+    },
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => original_input,
+        state => #{progress => 1},
+        current_step => 1,
+        active_execution => ActiveExecution,
+        parallel_results => undefined,
+        result => undefined,
+        last_error => undefined,
+        status => running
+    },
+    Config = #{
+        id => AgentId,
+        state => #{progress => 0},
+        nodes => #{
+            work => fun(_Input) ->
+                Parent ! recovered_node_must_not_execute,
+                #{unexpected => true}
+            end
+        },
+        max_steps => 3
+    },
+
+    ok = hayata_task_store:ensure_started(),
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        Checkpoint
+    ),
+
+    with_agent(Config, fun(Agent) ->
+        NodePid = hayata_node:whereis(AgentId, work),
+        BlockedTask = fun() ->
+            Parent ! conflicting_execution_started,
+            receive
+                continue_conflicting_execution -> ok
+            end
+        end,
+
+        {ok, ExecutionId} = hayata_node:start_execution(
+            NodePid,
+            ExecutionId,
+            [{other_edge, BlockedTask}],
+            30000,
+            isolated,
+            self()
+        ),
+
+        receive
+            conflicting_execution_started -> ok
+        after 2000 ->
+            error(conflicting_execution_did_not_start)
+        end,
+
+        ?assertEqual(
+            {error, recovery_execution_mismatch},
+            hayata_agent:recover(Agent)
+        ),
+
+        Info = hayata_agent:get_info(Agent),
+
+        ?assertEqual(
+            recovery_required,
+            maps:get(status, Info)
+        ),
+
+        {ok, PersistedCheckpoint} =
+            hayata_task_store:get_invocation(
+                AgentId,
+                InvocationId
+            ),
+
+        ?assertEqual(
+            running,
+            maps:get(status, PersistedCheckpoint)
+        ),
+
+        ?assertEqual(
+            {error, no_result},
+            hayata_agent:get_result(Agent)
+        ),
+
+        receive
+            recovered_node_must_not_execute ->
+                error(node_executed_after_recovery_mismatch)
+        after 100 ->
+            ok
+        end,
+
+        NodePid ! continue_conflicting_execution
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->

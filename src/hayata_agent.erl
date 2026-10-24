@@ -1068,6 +1068,8 @@ persist_invocation_checkpoint(State) ->
 -spec checkpoint_status(term()) -> running | completed | failed.
 checkpoint_status(running) ->
     running;
+checkpoint_status(recovery_required) ->
+    running;
 checkpoint_status(completed) ->
     completed;
 checkpoint_status({error, _Reason}) ->
@@ -1299,5 +1301,22 @@ recover_persisted_node_execution(NodePid, NodeFun, NodeInput, ExecutionId, Recov
         {ok, ExecutionId} ->
             {reply, {ok, ExecutionId}, RecoveredState};
         {error, Reason} ->
-            {reply, {error, Reason}, OriginalState}
+            rollback_recovery_checkpoint(Reason, OriginalState)
+    end.
+
+-spec rollback_recovery_checkpoint(
+    term(),
+    #agent_state{}
+) -> {reply, term(), #agent_state{}}.
+rollback_recovery_checkpoint(Reason, OriginalState) ->
+    case persist_invocation_checkpoint(OriginalState) of
+        ok ->
+            {reply, {error, Reason}, OriginalState};
+        {error, PersistReason} ->
+            Error = {
+                recovery_failed_checkpoint_rollback_failed,
+                Reason,
+                PersistReason
+            },
+            {reply, {error, Error}, OriginalState}
     end.
