@@ -7,7 +7,8 @@
     save_invocation/1,
     get_task/1,
     save_task_result/2,
-    claim_task/2
+    claim_task/2,
+    get_active_invocation/1
 ]).
 
 -record(hayata_invocation_checkpoint, {
@@ -183,6 +184,37 @@ save_task_result(Key, Result) ->
     end,
     transaction_result(mnesia:transaction(Transaction)).
 
+-doc("Retrieves the most recently updated running invocation for an agent.").
+-spec get_active_invocation(term()) ->
+    {ok, checkpoint()} | {error, term()}.
+get_active_invocation(AgentId) ->
+    Transaction = fun() ->
+        mnesia:foldl(
+            fun
+                ({?INVOCATION_TABLE, {StoredAgentId, _InvocationId}, Checkpoint}, Acc)
+                        when StoredAgentId =:= AgentId ->
+                    case maps:get(status, Checkpoint, undefined) of
+                        running ->
+                            select_latest_invocation(Checkpoint, Acc);
+                        _ ->
+                            Acc
+                    end;
+                (_Record, Acc) ->
+                    Acc
+            end,
+            none,
+            ?INVOCATION_TABLE
+        )
+    end,
+    case mnesia:transaction(Transaction) of
+        {atomic, {ok, Checkpoint}} ->
+            {ok, Checkpoint};
+        {atomic, none} ->
+            {error, not_found};
+        {aborted, Reason} ->
+            {error, Reason}
+    end.
+
 %% Internal functions
 
 -spec ensure_mnesia_started() -> ok | {error, term()}.
@@ -221,6 +253,20 @@ normalize_schema_result({error, Reason}) ->
     {error, Reason};
 normalize_schema_result(Other) ->
     {error, Other}.
+
+-spec select_latest_invocation(checkpoint(), term()) ->
+    {ok, checkpoint()}.
+select_latest_invocation(Checkpoint, none) ->
+    {ok, Checkpoint};
+select_latest_invocation(Checkpoint, {ok, Existing}) ->
+    NewTimestamp = maps:get(updated_at, Checkpoint, 0),
+    ExistingTimestamp = maps:get(updated_at, Existing, 0),
+    case NewTimestamp > ExistingTimestamp of
+        true ->
+            {ok, Checkpoint};
+        false ->
+            {ok, Existing}
+    end.
 
 -spec create_tables() -> ok | {error, term()}.
 create_tables() ->

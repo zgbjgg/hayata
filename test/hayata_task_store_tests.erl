@@ -249,6 +249,159 @@ save_task_result_preserves_existing_fields_test() ->
     ?assertEqual(completed, maps:get(status, Checkpoint)),
     ?assertEqual(Result, maps:get(result, Checkpoint)).
 
+get_active_invocation_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => hello,
+        state => #{counter => 1},
+        current_step => 1
+    },
+
+    ?assertEqual(
+        {ok, created},
+        hayata_task_store:create_invocation(AgentId, Checkpoint)
+    ),
+
+    {ok, StoredCheckpoint} =
+        hayata_task_store:get_active_invocation(AgentId),
+
+    ?assertEqual(AgentId, maps:get(agent_id, StoredCheckpoint)),
+    ?assertEqual(InvocationId, maps:get(invocation_id, StoredCheckpoint)),
+    ?assertEqual(running, maps:get(status, StoredCheckpoint)).
+
+
+get_active_invocation_ignores_completed_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => hello,
+        state => #{},
+        current_step => 1
+    },
+
+    {ok, created} =
+        hayata_task_store:create_invocation(AgentId, Checkpoint),
+
+    {ok, StoredCheckpoint} =
+        hayata_task_store:get_invocation(AgentId, InvocationId),
+
+    ?assertEqual(
+        ok,
+        hayata_task_store:save_invocation(
+            StoredCheckpoint#{
+                status => completed,
+                result => #{done => true}
+            }
+        )
+    ),
+
+    ?assertEqual(
+        {error, not_found},
+        hayata_task_store:get_active_invocation(AgentId)
+    ).
+
+get_active_invocation_ignores_failed_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    InvocationId = make_ref(),
+
+    Checkpoint = #{
+        invocation_id => InvocationId,
+        input => hello,
+        state => #{},
+        current_step => 1
+    },
+
+    {ok, created} =
+        hayata_task_store:create_invocation(AgentId, Checkpoint),
+
+    {ok, StoredCheckpoint} =
+        hayata_task_store:get_invocation(AgentId, InvocationId),
+
+    ?assertEqual(
+        ok,
+        hayata_task_store:save_invocation(
+            StoredCheckpoint#{
+                status => failed,
+                last_error => test_failure
+            }
+        )
+    ),
+
+    ?assertEqual(
+        {error, not_found},
+        hayata_task_store:get_active_invocation(AgentId)
+    ).
+
+
+get_active_invocation_filters_by_agent_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId1 = make_ref(),
+    AgentId2 = make_ref(),
+
+    InvocationId = make_ref(),
+
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId1,
+        #{
+            invocation_id => InvocationId,
+            input => first,
+            state => #{}
+        }
+    ),
+
+    ?assertEqual(
+        {error, not_found},
+        hayata_task_store:get_active_invocation(AgentId2)
+    ).
+
+
+get_active_invocation_returns_latest_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    FirstInvocationId = make_ref(),
+    SecondInvocationId = make_ref(),
+
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        #{
+            invocation_id => FirstInvocationId,
+            input => first,
+            state => #{step => 1}
+        }
+    ),
+
+    timer:sleep(2),
+
+    {ok, created} = hayata_task_store:create_invocation(
+        AgentId,
+        #{
+            invocation_id => SecondInvocationId,
+            input => second,
+            state => #{step => 2}
+        }
+    ),
+
+    {ok, ActiveCheckpoint} =
+        hayata_task_store:get_active_invocation(AgentId),
+
+    ?assertEqual(
+        SecondInvocationId,
+        maps:get(invocation_id, ActiveCheckpoint)
+    ).
+
 get_missing_task_test() ->
     ok = hayata_task_store:ensure_started(),
 
