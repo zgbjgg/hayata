@@ -249,6 +249,7 @@ handle_info(
             %% Ignore stale or unrelated execution notifications.
             {noreply, State}
     end;
+
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -261,14 +262,23 @@ handle_info(
 ) ->
     case apply_node_result(FinalResult, State) of
         {ok, UpdatedState} ->
-            case evaluate_policy(UpdatedState) of
-                {ok, NextState} ->
-                    {noreply, NextState};
-                {error, _Reason, NextState} ->
-                    {noreply, NextState}
+            case persist_invocation_checkpoint(UpdatedState) of
+                ok ->
+                    case evaluate_policy(UpdatedState) of
+                        {ok, NextState} ->
+                            {noreply, NextState};
+                        {error, _Reason, NextState} ->
+                            {noreply, NextState}
+                    end;
+                {error, Reason} ->
+                    FailedState = fail_invocation(Reason, UpdatedState),
+                    _ = persist_invocation_checkpoint(FailedState),
+                    {noreply, FailedState}
             end;
         {error, Reason, UpdatedState} ->
-            {noreply, fail_invocation(Reason, UpdatedState)}
+            FailedState = fail_invocation(Reason, UpdatedState),
+            _ = persist_invocation_checkpoint(FailedState),
+            {noreply, FailedState}
     end;
 handle_info(
     {hayata_node_execution, _NodeId, _ExecutionId, _FinalResult},
