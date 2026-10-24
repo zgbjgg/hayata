@@ -474,6 +474,35 @@ start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
     ExecutionId = make_ref(),
     NodeInput = maps:put(input, Input, State#agent_state.state),
     Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    PlannedState = State#agent_state{
+        current_step = State#agent_state.current_step + 1,
+        active_execution = #{
+            node_id => NodeId,
+            execution_id => ExecutionId
+        }
+    },
+    case persist_invocation_checkpoint(PlannedState) of
+        ok ->
+            start_checkpointed_node_execution(
+                NodePid,
+                NodeId,
+                ExecutionId,
+                Task,
+                PlannedState
+            );
+        {error, Reason} ->
+            FailedState = fail_invocation(Reason, State),
+            {error, Reason, FailedState}
+    end.
+
+-spec start_checkpointed_node_execution(
+    pid(),
+    atom(),
+    reference(),
+    function(),
+    #agent_state{}
+) -> {ok, #agent_state{}} | {error, term(), #agent_state{}}.
+start_checkpointed_node_execution(NodePid, NodeId, ExecutionId, Task, PlannedState) ->
     case hayata_node:start_execution(
         NodePid,
         ExecutionId,
@@ -483,16 +512,11 @@ start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
         self()
     ) of
         {ok, ExecutionId} ->
-            {ok, State#agent_state{
-                current_step = State#agent_state.current_step + 1,
-                active_execution = #{
-                    node_id => NodeId,
-                    execution_id => ExecutionId
-                }
-            }};
+            {ok, PlannedState};
         {error, Reason} ->
             Error = {node_execution_start_failed, NodeId, Reason},
-            {error, Error, fail_invocation(Error, State)}
+            FailedState = fail_invocation(Error, PlannedState),
+            {error, Error, FailedState}
     end.
 
 -spec execute_node(function(), map()) -> {ok, map()} | {error, term()}.
