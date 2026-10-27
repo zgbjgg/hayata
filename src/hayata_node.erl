@@ -274,7 +274,8 @@ handle_call({track_edge, EdgeId, EdgePid}, _From, State) ->
     ),
     NewNodeState = State#node_state{active_edges = ActiveEdges},
     {reply, {ok, MonitorRef}, NewNodeState};
-handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
+handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State)
+        when is_function(TaskFun, 1) ->
     case hayata_edge:start(
         self(),
         undefined,
@@ -306,6 +307,8 @@ handle_call({start_edge, EdgeId, ExecutionId, TaskFun}, _From, State) ->
         {error, Reason} ->
             {reply, {error, Reason}, State}
     end;
+handle_call({start_edge, _EdgeId, _ExecutionId, _TaskFun}, _From, State) ->
+    {reply, {error, invalid_edge_task}, State};
 handle_call({start_execution, ExecutionId, EdgeTasks, TimeoutMs}, _From, State) ->
     start_execution_request(
         ExecutionId,

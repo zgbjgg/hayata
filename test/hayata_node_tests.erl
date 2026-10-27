@@ -2699,6 +2699,21 @@ recover_execution_rejects_edge_mismatch_test() ->
         )
     end).
 
+start_edge_rejects_invalid_task_test() ->
+    with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
+        ?assertEqual(
+            {error, invalid_edge_task},
+            hayata_node:start_edge(
+                Node,
+                edge_01,
+                execution_01,
+                fun() -> {ok, result_01} end
+            )
+        ),
+
+        ?assert(is_process_alive(Node))
+    end).
+
 await_edge_down(_Node, 0) ->
     error(edge_down_timeout);
 await_edge_down(Node, Attempts) ->
