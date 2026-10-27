@@ -468,6 +468,65 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
         ok
     end.
 
+
+different_nodes_use_independent_checkpoints_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+
+    FirstMetadata = #{
+        agent_id => AgentId,
+        node_id => node_a
+    },
+    SecondMetadata = #{
+        agent_id => AgentId,
+        node_id => node_b
+    },
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        fun(_Context) -> {ok, result_a} end,
+        FirstMetadata
+    ),
+
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    ?assertEqual(
+        {hayata_edge_result, EdgeId, ExecutionId, {ok, result_a}},
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        fun(_Context) -> {ok, result_b} end,
+        SecondMetadata
+    ),
+
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {hayata_edge_result, EdgeId, ExecutionId, {ok, result_b}},
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(SecondMonitor, SecondEdgePid)
+    ).
+
 receive_message() ->
     receive
         Message = {hayata_edge_result, _, _, _} ->

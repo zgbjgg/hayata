@@ -223,12 +223,15 @@ run_task(TaskFun, Context) ->
             {error, {exception, Class, Reason, Stacktrace}}
     end.
 
+
 -spec task_key(#edge_state{}) -> tuple().
 task_key(State) ->
     Metadata = State#edge_state.metadata,
     AgentId = maps:get(agent_id, Metadata, undefined),
+    NodeId = maps:get(node_id, Metadata, undefined),
     {
         AgentId,
+        NodeId,
         State#edge_state.execution_id,
         State#edge_state.edge_id
     }.

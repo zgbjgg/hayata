@@ -2274,7 +2274,7 @@ recovers_completed_task_without_reexecution_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         StoredResult
     ),
 
