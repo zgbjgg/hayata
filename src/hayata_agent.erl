@@ -532,7 +532,7 @@ start_next_node(NodeId, Input, State) ->
 start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
     ExecutionId = make_ref(),
     NodeInput = maps:put(input, Input, State#agent_state.state),
-    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
     PlannedState = State#agent_state{
         current_step = State#agent_state.current_step + 1,
         active_execution = #{
@@ -936,7 +936,7 @@ start_parallel_node_executions([NodeId | Rest], Input, Transition, State) ->
     NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
     ExecutionId = make_ref(),
     NodeInput = maps:get(node_input, Transition),
-    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
     StartExecution = State#agent_state.execution_starter,
 
     Pending = maps:put(
@@ -1294,7 +1294,7 @@ recover_inspected_node_execution(NodeId, ExecutionId, NodeInput, _TaskStatus, St
     #agent_state{}
 ) -> {reply, term(), #agent_state{}}.
 recover_persisted_node_execution(NodePid, NodeFun, NodeInput, ExecutionId, RecoveredState, OriginalState) ->
-    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
     case hayata_node:recover_execution(
         NodePid,
         ExecutionId,
@@ -1518,7 +1518,7 @@ recover_parallel_pending_nodes(
         RecoveredState#agent_state.id,
         NodeId
     ),
-    Task = fun() -> execute_node(NodeFun, NodeInput) end,
+    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
     RecoveryResult = try
         hayata_node:recover_execution(
             NodePid,

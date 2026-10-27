@@ -47,7 +47,7 @@
 -type local_state() :: map().
 -type edge_definitions() :: [term()].
 -type edge_id() :: term().
--type edge_task() :: {edge_id(), fun(() -> term())}.
+-type edge_task() :: {edge_id(), fun((map()) -> term())}.
 
 -export_type([
     agent_id/0,
@@ -119,7 +119,7 @@ track_edge(Server, EdgeId, EdgePid) when is_pid(EdgePid) ->
     gen_server:server_ref(),
     edge_id(),
     term(),
-    fun(() -> term())
+    fun((map()) -> term())
 ) -> {ok, pid()} | {error, term()}.
 start_edge(Node, EdgeId, ExecutionId, TaskFun) ->
     gen_server:call(
@@ -468,7 +468,7 @@ validate_execution(_ExecutionId, EdgeTasks, _TimeoutMs) ->
 validate_edge_tasks([], _Seen, EdgeIds) ->
     {ok, lists:reverse(EdgeIds)};
 validate_edge_tasks([{EdgeId, TaskFun} | Rest], Seen, EdgeIds)
-        when is_function(TaskFun, 0) ->
+        when is_function(TaskFun, 1) ->
     case lists:member(EdgeId, Seen) of
         true ->
             {error, duplicate_edge_id};
@@ -482,7 +482,7 @@ validate_edge_tasks([{EdgeId, TaskFun} | Rest], Seen, EdgeIds)
 validate_edge_tasks(_EdgeTasks, _Seen, _EdgeIds) ->
     {error, invalid_edge_task}.
 
--spec edge_ids([{term(), fun(() -> term())}]) -> [term()].
+-spec edge_ids([{term(), fun((map()) -> term())}]) -> [term()].
 edge_ids(EdgeTasks) ->
     [EdgeId || {EdgeId, _TaskFun} <- EdgeTasks].
 
