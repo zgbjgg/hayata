@@ -9,7 +9,7 @@ successful_execution_test() ->
         self(),
         edge_01,
         execution_01,
-        fun() -> {ok, result_01} end
+        fun(_Context) -> {ok, result_01} end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -28,7 +28,7 @@ controlled_error_test() ->
         self(),
         edge_02,
         execution_02,
-        fun() -> {error, task_failed} end
+        fun(_Context) -> {error, task_failed} end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -50,7 +50,7 @@ exception_test() ->
         self(),
         edge_03,
         execution_03,
-        fun() -> erlang:error(task_crashed) end
+        fun(_Context) -> erlang:error(task_crashed) end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -77,8 +77,8 @@ abrupt_termination_test() ->
         self(),
         edge_04,
         ExecutionId,
-        fun() ->
-            Parent ! {task_started, self()},
+        fun(#{parent := ParentEdgePid}) ->
+            Parent ! {task_started, ParentEdgePid},
             receive
                 continue -> {ok, unexpected}
             end
@@ -111,7 +111,7 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
             self(),
             edge_telemetry,
             execution_telemetry,
-            fun() -> {ok, result_telemetry} end
+            fun(_Context) -> {ok, result_telemetry} end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -172,7 +172,7 @@ telemetry_emits_stop_for_controlled_error_test() ->
             self(),
             edge_telemetry_error,
             execution_telemetry_error,
-            fun() -> {error, task_failed} end
+            fun(_Context) -> {error, task_failed} end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -243,7 +243,7 @@ telemetry_emits_exception_for_task_exception_test() ->
             self(),
             edge_telemetry_exception,
             execution_telemetry_exception,
-            fun() -> erlang:error(task_crashed) end
+            fun(_Context) -> erlang:error(task_crashed) end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -320,7 +320,7 @@ completed_checkpoint_is_reused_after_edge_restart_test() ->
     Metadata = #{agent_id => AgentId},
     ExpectedResult = {ok, #{processed => true}},
 
-    Task = fun() ->
+    Task = fun(_Context) ->
         {ok, #{processed => true}}
     end,
 
@@ -350,8 +350,8 @@ completed_checkpoint_is_reused_after_edge_restart_test() ->
         receive_down(FirstMonitor, FirstEdgePid)
     ),
 
-    RetryTask = fun() ->
-        Parent ! {task_reexecuted, self()},
+    RetryTask = fun(#{parent := ParentEdgePid2}) ->
+        Parent ! {task_reexecuted, ParentEdgePid2},
         {ok, unexpected_result}
     end,
 
@@ -397,8 +397,8 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
     EdgeId = make_ref(),
     Metadata = #{agent_id => AgentId},
 
-    Task = fun() ->
-        Parent ! {task_started, self()},
+    Task = fun(#{parent := ParentEdgePid}) ->
+        Parent ! {task_started, ParentEdgePid},
         receive
             continue -> {ok, completed}
         end
@@ -429,8 +429,8 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
         receive_down(FirstMonitor, FirstEdgePid)
     ),
 
-    RetryTask = fun() ->
-        Parent ! {task_reexecuted, self()},
+    RetryTask = fun(#{parent := ParentEdgePid2}) ->
+        Parent ! {task_reexecuted, ParentEdgePid2},
         {ok, unexpected_result}
     end,
 

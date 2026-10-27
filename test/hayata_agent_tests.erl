@@ -2569,7 +2569,7 @@ rejects_recovery_mismatch_without_stale_checkpoint_test() ->
 
     with_agent(Config, fun(Agent) ->
         NodePid = hayata_node:whereis(AgentId, work),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! conflicting_execution_started,
             receive
                 continue_conflicting_execution -> ok
@@ -2674,7 +2674,7 @@ rejects_recovery_when_checkpoint_rollback_fails_test() ->
 
     with_agent(Config, fun(Agent) ->
         NodePid = hayata_node:whereis(AgentId, work),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! conflicting_execution_started,
             receive
                 continue_conflicting_execution -> ok
@@ -3007,7 +3007,7 @@ cancels_started_parallel_recovery_branches_on_failure_test() ->
 
     with_agent(Config, fun(Agent) ->
         BetaPid = hayata_node:whereis(AgentId, beta),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! {conflicting_beta_execution_started, self()},
             receive
                  continue_conflicting_beta_execution -> ok
