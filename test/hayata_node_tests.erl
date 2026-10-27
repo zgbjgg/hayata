@@ -227,9 +227,9 @@ reducer_recovery_test() ->
                 atomics:add(FirstRuns, 1, 1),
                 {ok, first_result}
             end},
-            {edge_02, fun(#{parent := ParentEdgePid}) ->
+            {edge_02, fun(#{parent := _ParentEdgePid}) ->
                 atomics:add(SecondRuns, 1, 1),
-                Parent ! {second_edge_started, ParentEdgePid},
+                Parent ! {second_edge_started, self()},
                 receive
                     continue -> {ok, second_result}
                 end
@@ -468,8 +468,8 @@ edge_result_preserved_after_down_test() ->
     with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
         Parent = self(),
         EdgeTasks = [
-            {edge_01, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, ParentEdgePid},
+            {edge_01, fun(#{parent := _ParentEdgePid}) ->
+                Parent ! {edge_started, self()},
                 receive
                     continue -> {ok, actual_result}
                 end
@@ -743,8 +743,8 @@ terminal_execution_ignores_late_reducer_down_test() ->
         ExecutionId = execution_late_reducer_down,
 
         EdgeTasks = [
-            {edge_01, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, ParentEdgePid},
+            {edge_01, fun(#{parent := _ParentEdgePid}) ->
+                Parent ! {edge_started, self()},
                 receive
                     continue -> {ok, result_01}
                 end
@@ -883,8 +883,8 @@ reducer_recovery_preserves_edge_errors_test() ->
             {edge_01, fun(_Context) ->
                 {error, expected_failure}
             end},
-            {edge_02, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {second_edge_started, ParentEdgePid},
+            {edge_02, fun(#{parent := _ParentEdgePid}) ->
+                Parent ! {second_edge_started, self()},
                 receive
                     continue -> {ok, second_result}
                 end
@@ -958,7 +958,7 @@ reducer_recovery_with_edge_termination_test() ->
         EdgeTasks = [
             {edge_01, fun(#{parent := ParentEdgePid}) ->
                 atomics:add(Runs, 1, 1),
-                Parent ! {edge_started, ParentEdgePid},
+                Parent ! {edge_started, self(), ParentEdgePid},
                 receive
                     continue -> {ok, recovered_result}
                 end
@@ -972,8 +972,8 @@ reducer_recovery_with_edge_termination_test() ->
             5000
         ),
 
-        EdgePid = receive
-            {edge_started, Pid} -> Pid
+        {TaskPid, EdgePid} = receive
+            {edge_started, TPid, Pid} -> {TPid, Pid}
         after 1000 ->
             error(edge_start_timeout)
         end,
@@ -990,7 +990,7 @@ reducer_recovery_with_edge_termination_test() ->
         try
             ok = sys:suspend(Node),
             exit(OriginalReducer, kill),
-            EdgePid ! continue,
+            TaskPid ! continue,
 
             receive
                 {'DOWN', EdgeMonitor, process, EdgePid, normal} ->
@@ -1033,7 +1033,7 @@ reducer_recovery_with_edge_failure_test() ->
         EdgeTasks = [
             {edge_01, fun(#{parent := ParentEdgePid}) ->
                 atomics:add(Runs, 1, 1),
-                Parent ! {edge_started, ParentEdgePid},
+                Parent ! {edge_started, self(), ParentEdgePid},
                 receive
                     continue -> {error, expected_failure}
                 end
@@ -1047,8 +1047,8 @@ reducer_recovery_with_edge_failure_test() ->
             5000
         ),
 
-        EdgePid = receive
-            {edge_started, Pid} -> Pid
+        {TaskPid, EdgePid} = receive
+            {edge_started, TPid, Pid} -> {TPid, Pid}
         after 1000 ->
             error(edge_start_timeout)
         end,
@@ -1065,7 +1065,7 @@ reducer_recovery_with_edge_failure_test() ->
         try
             ok = sys:suspend(Node),
             exit(OriginalReducer, kill),
-            EdgePid ! continue,
+            TaskPid ! continue,
 
             receive
                 {'DOWN', EdgeMonitor, process, EdgePid,
@@ -1106,8 +1106,8 @@ reducer_recovery_ignores_stale_result_test() ->
         ExecutionId = execution_stale_reducer_result,
 
         EdgeTasks = [
-            {edge_01, fun(#{oarent := ParentEdgePid}) ->
-                Parent ! {edge_started, ParentEdgePid},
+            {edge_01, fun(#{parent := _ParentEdgePid}) ->
+                Parent ! {edge_started, self()},
                 receive
                     continue -> {ok, actual_result}
                 end
@@ -1304,9 +1304,9 @@ reducer_recovery_edge_completes_after_replacement_test() ->
         ExecutionId = execution_edge_after_replacement,
 
         EdgeTasks = [
-            {edge_01, fun(#{parent := ParentEdgePid}) ->
+            {edge_01, fun(#{parent := _ParentEdgePid}) ->
                 atomics:add(Runs, 1, 1),
-                Parent ! {edge_started, ParentEdgePid},
+                Parent ! {edge_started, self()},
                 receive
                     continue -> {ok, recovered_result}
                 end
@@ -1373,14 +1373,14 @@ reducer_recovery_preserves_concurrent_edge_results_test() ->
         EdgeTasks = [
             {edge_01, fun(#{parent :=  ParentEdgePid}) ->
                 atomics:add(Runs, 1, 1),
-                Parent ! {edge_started, edge_01, ParentEdgePid},
+                Parent ! {edge_started, edge_01, self(), ParentEdgePid},
                 receive
                     continue -> {ok, result_01}
                 end
             end},
             {edge_02, fun(#{parent :=  ParentEdgePid}) ->
                 atomics:add(Runs, 2, 1),
-                Parent ! {edge_started, edge_02, ParentEdgePid},
+                Parent ! {edge_started, edge_02, self(), ParentEdgePid},
                 receive
                     continue -> {error, expected_failure}
                 end
@@ -1405,7 +1405,7 @@ reducer_recovery_preserves_concurrent_edge_results_test() ->
 
         EdgeMonitors = [
             {EdgeId, Pid, erlang:monitor(process, Pid)}
-            || {EdgeId, Pid} <- maps:to_list(EdgePids)
+            || {EdgeId, {_, Pid}} <- maps:to_list(EdgePids)
         ],
 
         try
@@ -1413,8 +1413,8 @@ reducer_recovery_preserves_concurrent_edge_results_test() ->
             exit(OriginalReducer, kill),
 
             maps:foreach(
-                fun(_EdgeId, Pid) ->
-                    Pid ! continue
+                fun(_EdgeId, {TPid, _Pid}) ->
+                    TPid ! continue
                 end,
                 EdgePids
             ),
@@ -1473,13 +1473,13 @@ reducer_recovery_processes_queued_results_before_timeout_test() ->
 
         EdgeTasks = [
             {edge_01, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, edge_01, ParentEdgePid},
+                Parent ! {edge_started, edge_01, self(), ParentEdgePid},
                 receive
                     continue -> {ok, result_01}
                 end
             end},
             {edge_02, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, edge_02, ParentEdgePid},
+                Parent ! {edge_started, edge_02, self(), ParentEdgePid},
                 receive
                     continue -> {ok, result_02}
                 end
@@ -1562,8 +1562,8 @@ reducer_recovery_processes_queued_results_before_timeout_test() ->
         ),
 
         maps:foreach(
-            fun(_EdgeId, EdgePid) ->
-                EdgePid ! continue
+            fun(_EdgeId, {TaskPid, _EdgePid}) ->
+                TaskPid ! continue
             end,
             EdgePids
         )
@@ -1576,7 +1576,7 @@ duplicate_edge_down_preserves_execution_test() ->
 
         EdgeTasks = [
             {edge_01, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, ParentEdgePid},
+                Parent ! {edge_started, self(), ParentEdgePid},
                 receive
                     continue -> {ok, actual_result}
                 end
@@ -1590,8 +1590,8 @@ duplicate_edge_down_preserves_execution_test() ->
             5000
         ),
 
-        EdgePid = receive
-            {edge_started, Pid} -> Pid
+        {TaskPid, EdgePid} = receive
+            {edge_started, TPid, Pid} -> {TPid, Pid}
         after 1000 ->
             error(edge_start_timeout)
         end,
@@ -1602,7 +1602,7 @@ duplicate_edge_down_preserves_execution_test() ->
         {MonitorRef, EdgeInfo} = hd(maps:to_list(ActiveEdgesBefore)),
         ?assertEqual(EdgePid, maps:get(pid, EdgeInfo)),
 
-        EdgePid ! continue,
+        TaskPid ! continue,
 
         await_execution_completed(Node, ExecutionId, 200),
         await_edge_termination(Node, edge_01, ExecutionId, 200),
@@ -1935,7 +1935,7 @@ cancel_execution_isolation_test() ->
 
         FirstEdgeTasks = [
             {edge_01, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, execution_01, ParentEdgePid},
+                Parent ! {edge_started, execution_01, self(), ParentEdgePid},
                 receive
                     continue -> {ok, result_01}
                 end
@@ -1944,7 +1944,7 @@ cancel_execution_isolation_test() ->
 
         SecondEdgeTasks = [
             {edge_02, fun(#{parent := ParentEdgePid}) ->
-                Parent ! {edge_started, execution_02, ParentEdgePid},
+                Parent ! {edge_started, execution_02, self(), ParentEdgePid},
                 receive
                     continue -> {ok, result_02}
                 end
@@ -1971,16 +1971,16 @@ cancel_execution_isolation_test() ->
             )
         ),
 
-        FirstEdgePid = receive
-            {edge_started, execution_01, FirstPid} ->
-                FirstPid
+        {_FirstTaskPid, FirstEdgePid} = receive
+            {edge_started, execution_01, FirstTPid, FirstPid} ->
+                {FirstTPid, FirstPid}
         after 1000 ->
             error(first_edge_start_timeout)
         end,
 
-        SecondEdgePid = receive
-            {edge_started, execution_02, SecondPid} ->
-                SecondPid
+        {SecondTaskPid, SecondEdgePid} = receive
+            {edge_started, execution_02, SecondTPid, SecondPid} ->
+                {SecondTPid, SecondPid}
         after 1000 ->
             error(second_edge_start_timeout)
         end,
@@ -2005,7 +2005,7 @@ cancel_execution_isolation_test() ->
         ?assertEqual(cancelled, maps:get(status, FirstExecution)),
         ?assertNotEqual(cancelled, maps:get(status, SecondExecution)),
 
-        SecondEdgePid ! continue,
+        SecondTaskPid ! continue,
 
         await_execution_completed(Node, execution_02, 200),
 
@@ -2624,9 +2624,9 @@ recover_active_execution_updates_recipient_test() ->
 
     with_node(make_ref(), think_01, think, #{}, [], fun(Node) ->
         ExecutionId = make_ref(),
-        Task = fun(#{parent := ParentEdgePid}) ->
+        Task = fun(#{parent := _ParentEdgePid}) ->
             atomics:add(Runs, 1, 1),
-            Parent ! {recovery_task_started, ParentEdgePid},
+            Parent ! {recovery_task_started, self()},
             receive
                 continue -> {ok, active_result}
             end
@@ -2899,10 +2899,10 @@ receive_edge_pids(0, EdgePids) ->
     EdgePids;
 receive_edge_pids(Count, EdgePids) ->
     receive
-        {edge_started, EdgeId, Pid} ->
+        {edge_started, EdgeId, TPid, Pid} ->
             receive_edge_pids(
                 Count - 1,
-                maps:put(EdgeId, Pid, EdgePids)
+                maps:put(EdgeId, {TPid, Pid}, EdgePids)
             )
     after 1000 ->
         error(edge_start_timeout)
