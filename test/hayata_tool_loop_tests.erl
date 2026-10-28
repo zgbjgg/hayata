@@ -186,6 +186,52 @@ run_executes_multiple_tools_in_order_test() ->
         error(missing_tool_loop_messages)
     end.
 
+
+run_recovers_from_unknown_tool_test() ->
+    Parent = self(),
+
+    LLM = fun(Request) ->
+        Messages = maps:get(messages, Request),
+
+        case length(Messages) of
+            1 ->
+                {ok, unknown_tool_call_response()};
+            _ ->
+                Parent ! {recovery_messages, Messages},
+                {ok, text_response(<<"I could not retrieve the forecast.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [weather_tool()],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {recovery_messages, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+
+            ?assertEqual(tool, maps:get(role, ToolMessage)),
+            ?assertEqual(
+                <<"call_unknown">>,
+                maps:get(tool_call_id, ToolMessage)
+            ),
+
+            [Content] = maps:get(content, ToolMessage),
+            Error = json:decode(maps:get(text, Content)),
+
+            ?assertEqual(
+                <<"tool_execution_failed">>,
+                maps:get(<<"error">>, Error)
+            )
+    after 1000 ->
+        error(missing_unknown_tool_result)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
@@ -296,4 +342,22 @@ forecast_tool() ->
         handler => fun(_Arguments) ->
             {ok, #{forecast => <<"sunny">>}}
         end
+    }.
+
+
+-spec unknown_tool_call_response() -> map().
+unknown_tool_call_response() ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_unknown">>,
+                    name => <<"get_forecast">>,
+                    arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => tool_calls
     }.
