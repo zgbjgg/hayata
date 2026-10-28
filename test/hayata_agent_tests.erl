@@ -3183,6 +3183,131 @@ restores_active_invocation_after_supervisor_restart_test() ->
         exit(SecondSup, shutdown)
     end.
 
+run_options_subscriber_receives_terminal_result_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self()}
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_true_preserves_terminal_result_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{
+                subscriber => self(),
+                stream => true
+            }
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_false_is_accepted_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{
+                subscriber => self(),
+                stream => false
+            }
+        ),
+
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+run_options_stream_defaults_to_false_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self()}
+        ),
+
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+run_options_rejects_invalid_subscriber_test() ->
+    ?assertEqual(
+        {error, invalid_subscriber},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{subscriber => not_a_pid}
+        )
+    ).
+
+run_options_rejects_stream_without_subscriber_test() ->
+    ?assertEqual(
+        {error, subscriber_required_for_stream},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{stream => true}
+        )
+    ).
+
+run_options_rejects_invalid_stream_value_test() ->
+    ?assertEqual(
+        {error, invalid_stream_option},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{
+                subscriber => self(),
+                stream => yes
+            }
+        )
+    ).
+
+run_options_rejects_unknown_option_test() ->
+    ?assertEqual(
+        {error, {unknown_run_option, unsupported}},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{
+                subscriber => self(),
+                unsupported => true
+            }
+        )
+    ).
+
+run_options_rejects_non_map_test() ->
+    ?assertEqual(
+        {error, invalid_run_options},
+        hayata_agent:run(self(), hello, not_a_map)
+    ).
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -3257,3 +3382,16 @@ await_checkpoint_update(AgentId, InvocationId, PreviousUpdatedAt, Attempts) ->
         {error, Reason} ->
             error({checkpoint_read_failed, Reason})
     end.
+
+run_options_test_config() ->
+    #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{
+            respond => fun(_State) -> #{} end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    }.
