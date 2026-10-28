@@ -182,7 +182,8 @@ start_agent(SupPid, Config) ->
                 max_steps => maps:get(max_steps, Config, 10),
                 execution_timeout => maps:get(execution_timeout, Config, 3000),
                 execution_starter => maps:get(execution_starter, Config, fun hayata_node:start_execution/6),
-                llm => maps:get(llm, Config, undefined)
+                llm => maps:get(llm, Config, undefined),
+                conversation_memory => maps:get(conversation_memory, Config, false)
             },
             ChildSpec = #{
                 id => hayata_agent,

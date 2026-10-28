@@ -4243,7 +4243,7 @@ conversation_memory_test_config(Enabled) ->
         },
         decision_policy => fun(Context) ->
             case maps:get(step, Context) of
-                0 -> {next, update_history, undefined};
+                0 -> {next, update_history, maps:get(input, Context)};
                 1 -> {finish, maps:get(state, Context)}
             end
         end,
