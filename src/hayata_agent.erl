@@ -246,6 +246,42 @@ handle_cast(_Request, State) ->
 -doc(false).
 -spec handle_info(term(), #agent_state{}) ->
     {noreply, #agent_state{}}.
+
+handle_info(
+    {
+        hayata_node_partial_result,
+        InvocationId,
+        NodeId,
+        ExecutionId,
+        EdgeId,
+        PartialResult
+    },
+    #agent_state{
+        status = running,
+        invocation_id = InvocationId,
+        stream_enabled = true
+    } = State
+) when is_map(PartialResult) ->
+    case active_node_execution(
+        NodeId,
+        ExecutionId,
+        State#agent_state.active_execution
+    ) of
+        true ->
+            UpdatedState = emit_stream_event(
+                State,
+                node_partial_result,
+                #{
+                    node_id => NodeId,
+                    execution_id => ExecutionId,
+                    edge_id => EdgeId,
+                    result => PartialResult
+                }
+            ),
+            {noreply, UpdatedState};
+        false ->
+            {noreply, State}
+    end;
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -562,7 +598,13 @@ start_next_node(NodeId, Input, State) ->
 start_node_execution(NodePid, NodeId, NodeFun, Input, State) ->
     ExecutionId = make_ref(),
     NodeInput = maps:put(input, Input, State#agent_state.state),
-    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
+    NodeContext = node_execution_context(
+        NodeInput,
+        NodeId,
+        ExecutionId,
+        State
+    ),
+    Task = fun(_Context) -> execute_node(NodeFun, NodeContext) end,
     PlannedState = State#agent_state{
         current_step = State#agent_state.current_step + 1,
         active_execution = #{
@@ -975,7 +1017,13 @@ start_parallel_node_executions([NodeId | Rest], Input, Transition, State) ->
     NodePid = hayata_node:whereis(State#agent_state.id, NodeId),
     ExecutionId = make_ref(),
     NodeInput = maps:get(node_input, Transition),
-    Task = fun(_Context) -> execute_node(NodeFun, NodeInput) end,
+    NodeContext = node_execution_context(
+        NodeInput,
+        NodeId,
+        ExecutionId,
+        State
+    ),
+    Task = fun(_Context) -> execute_node(NodeFun, NodeContext) end,
     StartExecution = State#agent_state.execution_starter,
 
     Pending = maps:put(
@@ -1759,3 +1807,60 @@ emit_stream_event(
     State#agent_state{stream_sequence = NextSequence};
 emit_stream_event(State, _Type, _Data) ->
     State.
+
+-spec node_execution_context(
+    map(),
+    atom(),
+    reference(),
+    #agent_state{}
+) -> map().
+node_execution_context(
+    NodeInput,
+    NodeId,
+    ExecutionId,
+    #agent_state{
+        stream_enabled = true,
+        subscription_pid = SubscriberPid,
+        invocation_id = InvocationId
+    }
+) when is_pid(SubscriberPid) ->
+    AgentPid = self(),
+    Streamer = fun
+        (PartialResult) when is_map(PartialResult) ->
+            AgentPid ! {
+                hayata_node_partial_result,
+                InvocationId,
+                NodeId,
+                ExecutionId,
+                node_result,
+                PartialResult
+            },
+            ok;
+        (_PartialResult) ->
+            {error, invalid_partial_result}
+    end,
+    maps:put(hayata_streamer, Streamer, NodeInput);
+node_execution_context(NodeInput, _NodeId, _ExecutionId, _State) ->
+    NodeInput.
+
+-spec active_node_execution(atom(), reference(), term()) -> boolean().
+active_node_execution(
+    NodeId,
+    ExecutionId,
+    #{node_id := NodeId, execution_id := ExecutionId}
+) ->
+    true;
+active_node_execution(
+    NodeId,
+    ExecutionId,
+    #{
+        type := parallel,
+        pending := Pending
+    }
+) ->
+    case maps:find(NodeId, Pending) of
+        {ok, ExecutionId} -> true;
+        _ -> false
+    end;
+active_node_execution(_NodeId, _ExecutionId, _ActiveExecution) ->
+    false.
