@@ -235,19 +235,7 @@ handle_call(recover, _From,
     );
 handle_call(recover, _From, State) ->
     {reply, {error, recovery_not_required}, State};
-handle_call(_Request, _From, State) ->
-    {reply, {error, unsupported_request}, State}.
-
--doc(false).
--spec handle_cast(term(), #agent_state{}) -> {noreply, #agent_state{}}.
-handle_cast(_Request, State) ->
-    {noreply, State}.
-
--doc(false).
--spec handle_info(term(), #agent_state{}) ->
-    {noreply, #agent_state{}}.
-
-handle_info(
+handle_call(
     {
         hayata_node_partial_result,
         InvocationId,
@@ -256,6 +244,7 @@ handle_info(
         EdgeId,
         PartialResult
     },
+    _From,
     #agent_state{
         status = running,
         invocation_id = InvocationId,
@@ -278,10 +267,28 @@ handle_info(
                     result => PartialResult
                 }
             ),
-            {noreply, UpdatedState};
+            {reply, ok, UpdatedState};
         false ->
-            {noreply, State}
+            {reply, {error, stale_execution}, State}
     end;
+handle_call(
+    {hayata_node_partial_result, _InvocationId, _NodeId,
+     _ExecutionId, _EdgeId, _PartialResult},
+    _From,
+    State
+) ->
+    {reply, {error, stale_execution}, State};
+handle_call(_Request, _From, State) ->
+    {reply, {error, unsupported_request}, State}.
+
+-doc(false).
+-spec handle_cast(term(), #agent_state{}) -> {noreply, #agent_state{}}.
+handle_cast(_Request, State) ->
+    {noreply, State}.
+
+-doc(false).
+-spec handle_info(term(), #agent_state{}) ->
+    {noreply, #agent_state{}}.
 handle_info(
     {hayata_node_execution, NodeId, ExecutionId, FinalResult},
     #agent_state{
@@ -1827,15 +1834,18 @@ node_execution_context(
     AgentPid = self(),
     Streamer = fun
         (PartialResult) when is_map(PartialResult) ->
-            AgentPid ! {
-                hayata_node_partial_result,
-                InvocationId,
-                NodeId,
-                ExecutionId,
-                node_result,
-                PartialResult
-            },
-            ok;
+            gen_server:call(
+                AgentPid,
+                {
+                    hayata_node_partial_result,
+                    InvocationId,
+                    NodeId,
+                    ExecutionId,
+                    node_result,
+                    PartialResult
+                },
+                5000
+            );
         (_PartialResult) ->
             {error, invalid_partial_result}
     end,

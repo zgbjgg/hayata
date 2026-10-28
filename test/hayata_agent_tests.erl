@@ -3819,6 +3819,289 @@ run_options_stream_emits_partial_node_results_test() ->
         end
     end).
 
+run_options_stream_emits_parallel_partial_results_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            alpha => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{node => alpha, chunk => first}),
+                ok = Streamer(#{node => alpha, chunk => second}),
+                #{alpha => completed}
+            end,
+            beta => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{node => beta, chunk => first}),
+                #{beta => completed}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, [alpha, beta], undefined};
+                2 -> {finish, maps:get(parallel_results, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        PartialEvents = [
+            Event
+            || Event <- Events,
+               maps:get(type, Event) =:= node_partial_result
+        ],
+
+        ?assertEqual(3, length(PartialEvents)),
+
+        PartialData = [
+            maps:get(data, Event)
+            || Event <- PartialEvents
+        ],
+
+        AlphaEvents = [
+            Data
+            || Data <- PartialData,
+               maps:get(node_id, Data) =:= alpha
+        ],
+
+        BetaEvents = [
+            Data
+            || Data <- PartialData,
+               maps:get(node_id, Data) =:= beta
+        ],
+
+        ?assertEqual(2, length(AlphaEvents)),
+        ?assertEqual(1, length(BetaEvents)),
+
+        ?assertEqual(
+            [#{node => alpha, chunk => first},
+             #{node => alpha, chunk => second}],
+            [maps:get(result, Data) || Data <- AlphaEvents]
+        ),
+
+        ?assertEqual(
+            [#{node => beta, chunk => first}],
+            [maps:get(result, Data) || Data <- BetaEvents]
+        ),
+
+        AlphaExecutionIds = lists:usort([
+            maps:get(execution_id, Data)
+            || Data <- AlphaEvents
+        ]),
+        BetaExecutionIds = lists:usort([
+            maps:get(execution_id, Data)
+            || Data <- BetaEvents
+        ]),
+
+        ?assertEqual(1, length(AlphaExecutionIds)),
+        ?assertEqual(1, length(BetaExecutionIds)),
+        ?assertNotEqual(AlphaExecutionIds, BetaExecutionIds),
+
+        Sequences = [
+            maps:get(sequence, Event)
+            || Event <- Events
+        ],
+
+        ?assertEqual(
+            lists:seq(1, length(Events)),
+            Sequences
+        ),
+
+        NodeCompletedSequences = [
+            maps:get(sequence, Event)
+            || Event <- Events,
+               maps:get(type, Event) =:= node_completed
+        ],
+
+        PartialSequences = [
+            maps:get(sequence, Event)
+            || Event <- PartialEvents
+        ],
+
+        ?assert(lists:all(
+            fun(PartialSequence) ->
+                lists:any(
+                    fun(CompletedSequence) ->
+                        PartialSequence < CompletedSequence
+                    end,
+                    NodeCompletedSequences
+                )
+            end,
+            PartialSequences
+        ))
+    end).
+
+run_options_stream_disabled_does_not_inject_streamer_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(Context) ->
+                Parent ! {
+                    streamer_available,
+                    maps:is_key(hayata_streamer, Context)
+                },
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => false}
+        ),
+
+        receive
+            {streamer_available, Available} ->
+                ?assertEqual(false, Available)
+        after 1000 ->
+            error(streamer_availability_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, _Event} ->
+                error(unexpected_stream_event)
+        after 100 ->
+            ok
+        end
+    end).
+
+run_options_stream_rejects_stale_partial_result_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{chunk => first}),
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        %% Consume the initial lifecycle events.
+        receive
+            {hayata_agent_event, InvocationId, Event1} ->
+                ?assertEqual(
+                    invocation_started,
+                    maps:get(type, Event1)
+                )
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event2} ->
+                ?assertEqual(
+                    node_started,
+                    maps:get(type, Event2)
+                )
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        %% Wait until the node has completed before submitting a stale
+        %% partial result. The execution reference is intentionally wrong.
+        receive
+            {hayata_agent_event, InvocationId, Event3} ->
+                ?assertEqual(
+                    node_partial_result,
+                    maps:get(type, Event3)
+                )
+        after 1000 ->
+            error(node_partial_result_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event4} ->
+                ?assertEqual(
+                    node_completed,
+                    maps:get(type, Event4)
+                )
+        after 1000 ->
+            error(node_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event5} ->
+                ?assertEqual(
+                    invocation_completed,
+                    maps:get(type, Event5)
+                )
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result0}} ->
+                ?assertEqual(#{answer => 42}, Result0)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        Result = gen_server:call(
+            Agent,
+            {
+                hayata_node_partial_result,
+                InvocationId,
+                work,
+                make_ref(),
+                node_result,
+                #{chunk => stale}
+            }
+        ),
+
+        ?assertEqual({error, stale_execution}, Result),
+
+        receive
+            {hayata_agent_event, InvocationId, Event6} ->
+                error({unexpected_event_after_stale_result, Event6})
+        after 100 ->
+            ok
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -3906,3 +4189,13 @@ run_options_test_config() ->
         end,
         max_steps => 3
     }.
+
+collect_stream_events(InvocationId, Acc) ->
+    receive
+        {hayata_agent_event, InvocationId, Event} ->
+            collect_stream_events(InvocationId, [Event | Acc]);
+        {hayata_agent_result, InvocationId, _Outcome} ->
+            lists:reverse(Acc)
+    after 3000 ->
+        error(stream_events_timeout)
+    end.
