@@ -336,6 +336,48 @@ run_recovers_from_tool_handler_exception_test() ->
         error(missing_handler_exception_result)
     end.
 
+run_does_not_execute_tool_at_iteration_limit_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! tool_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(_Request) ->
+        {ok, tool_call_response()}
+    end,
+
+    Result = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [Tool],
+        1
+    ),
+
+    ?assertEqual(
+        {error, max_iterations_reached},
+        Result
+    ),
+
+    receive
+        tool_executed ->
+            error(tool_executed_after_iteration_limit)
+    after 0 ->
+        ok
+    end.
+
 -spec request() -> map().
 request() ->
     #{
