@@ -2069,7 +2069,7 @@ inspects_completed_task_during_recovery_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         Result
     ),
 
@@ -2126,11 +2126,11 @@ inspects_parallel_tasks_during_recovery_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, FirstExecutionId, node_result},
+        {AgentId, first, FirstExecutionId, node_result},
         FirstResult
     ),
     {ok, execute} = hayata_task_store:claim_task(
-        {AgentId, SecondExecutionId, node_result},
+        {AgentId, second, SecondExecutionId, node_result},
         #{}
     ),
 
@@ -2274,7 +2274,7 @@ recovers_completed_task_without_reexecution_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         StoredResult
     ),
 
@@ -2342,7 +2342,7 @@ rejects_uncertain_task_recovery_test() ->
         Checkpoint
     ),
     {ok, execute} = hayata_task_store:claim_task(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         #{}
     ),
 
@@ -2569,7 +2569,7 @@ rejects_recovery_mismatch_without_stale_checkpoint_test() ->
 
     with_agent(Config, fun(Agent) ->
         NodePid = hayata_node:whereis(AgentId, work),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! conflicting_execution_started,
             receive
                 continue_conflicting_execution -> ok
@@ -2674,7 +2674,7 @@ rejects_recovery_when_checkpoint_rollback_fails_test() ->
 
     with_agent(Config, fun(Agent) ->
         NodePid = hayata_node:whereis(AgentId, work),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! conflicting_execution_started,
             receive
                 continue_conflicting_execution -> ok
@@ -3007,7 +3007,7 @@ cancels_started_parallel_recovery_branches_on_failure_test() ->
 
     with_agent(Config, fun(Agent) ->
         BetaPid = hayata_node:whereis(AgentId, beta),
-        BlockedTask = fun() ->
+        BlockedTask = fun(_Context) ->
             Parent ! {conflicting_beta_execution_started, self()},
             receive
                  continue_conflicting_beta_execution -> ok

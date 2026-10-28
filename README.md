@@ -3,7 +3,7 @@
 [![Hex.pm](https://img.shields.io/hexpm/v/hayata.svg)](https://hex.pm/packages/hayata)
 [![Build Status](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml/badge.svg)](https://github.com/zgbjgg/hayata/actions/workflows/erlang.yml)
 [![Codecov](https://img.shields.io/codecov/c/github/zgbjgg/hayata.svg)](https://codecov.io/gh/zgbjgg/hayata)
-[![License: MIT](https://img.shields.io/github/license/zgbjgg/hayata.svg)](https://raw.githubusercontent.com/zgbjgg/hayata/master/LICENSE)
+[![License: Apache-2.0](https://img.shields.io/github/license/zgbjgg/hayata.svg)](https://raw.githubusercontent.com/zgbjgg/hayata/master/LICENSE)
 [![Hex.pm](https://img.shields.io/hexpm/dt/hayata.svg)](https://hex.pm/packages/hayata)
 [![Hex.pm](https://img.shields.io/hexpm/dw/hayata.svg)](https://hex.pm/packages/hayata)
 
@@ -385,17 +385,11 @@ process or metrics backend.
 
 ## Fault handling and process supervision
 
-The edge watcher monitors the node independently. If the node dies,
-including through an untrappable `kill`, the watcher terminates its edge
-even though the node's `terminate/2` callback cannot run. Node processes
-are supervised and restarted after abnormal termination.
+The edge watcher monitors the node independently. If the node dies, including through an untrappable `kill`, the watcher terminates the edge so it does not remain orphaned. Node processes are supervised and restarted after abnormal termination.
 
-**Known limitation:** edge task functions execute synchronously inside
-the edge GenServer callback. A blocked task prevents that GenServer from
-processing messages until the callback returns. The watcher can
-terminate the edge when the node disappears, but cancellation semantics
-for blocked tasks and their side effects remain an area for further
-review.
+Edge tasks execute in linked worker processes, keeping the edge GenServer responsive while a task is running. If the edge terminates abnormally, its linked worker is terminated as well. However, terminating a process cannot undo external side effects that have already occurred.
+
+If a task may have affected an external service before its result was durably saved, recovery reports `task_execution_uncertain` and does not automatically re-execute the task. Applications should use idempotency keys, external deduplication, or other application-level safeguards where retry safety matters.
 
 ## Design principles
 

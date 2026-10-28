@@ -9,7 +9,7 @@ successful_execution_test() ->
         self(),
         edge_01,
         execution_01,
-        fun() -> {ok, result_01} end
+        fun(_Context) -> {ok, result_01} end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -28,7 +28,7 @@ controlled_error_test() ->
         self(),
         edge_02,
         execution_02,
-        fun() -> {error, task_failed} end
+        fun(_Context) -> {error, task_failed} end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -50,7 +50,7 @@ exception_test() ->
         self(),
         edge_03,
         execution_03,
-        fun() -> erlang:error(task_crashed) end
+        fun(_Context) -> erlang:error(task_crashed) end
     ),
     MonitorRef = erlang:monitor(process, EdgePid),
 
@@ -77,8 +77,8 @@ abrupt_termination_test() ->
         self(),
         edge_04,
         ExecutionId,
-        fun() ->
-            Parent ! {task_started, self()},
+        fun(#{parent := ParentEdgePid}) ->
+            Parent ! {task_started, ParentEdgePid},
             receive
                 continue -> {ok, unexpected}
             end
@@ -111,7 +111,7 @@ telemetry_emits_start_and_stop_for_successful_execution_test() ->
             self(),
             edge_telemetry,
             execution_telemetry,
-            fun() -> {ok, result_telemetry} end
+            fun(_Context) -> {ok, result_telemetry} end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -172,7 +172,7 @@ telemetry_emits_stop_for_controlled_error_test() ->
             self(),
             edge_telemetry_error,
             execution_telemetry_error,
-            fun() -> {error, task_failed} end
+            fun(_Context) -> {error, task_failed} end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -243,7 +243,7 @@ telemetry_emits_exception_for_task_exception_test() ->
             self(),
             edge_telemetry_exception,
             execution_telemetry_exception,
-            fun() -> erlang:error(task_crashed) end
+            fun(_Context) -> erlang:error(task_crashed) end
         ),
 
         MonitorRef = erlang:monitor(process, EdgePid),
@@ -320,7 +320,7 @@ completed_checkpoint_is_reused_after_edge_restart_test() ->
     Metadata = #{agent_id => AgentId},
     ExpectedResult = {ok, #{processed => true}},
 
-    Task = fun() ->
+    Task = fun(_Context) ->
         {ok, #{processed => true}}
     end,
 
@@ -350,8 +350,8 @@ completed_checkpoint_is_reused_after_edge_restart_test() ->
         receive_down(FirstMonitor, FirstEdgePid)
     ),
 
-    RetryTask = fun() ->
-        Parent ! {task_reexecuted, self()},
+    RetryTask = fun(#{parent := ParentEdgePid2}) ->
+        Parent ! {task_reexecuted, ParentEdgePid2},
         {ok, unexpected_result}
     end,
 
@@ -397,8 +397,8 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
     EdgeId = make_ref(),
     Metadata = #{agent_id => AgentId},
 
-    Task = fun() ->
-        Parent ! {task_started, self()},
+    Task = fun(#{parent := ParentEdgePid}) ->
+        Parent ! {task_started, ParentEdgePid},
         receive
             continue -> {ok, completed}
         end
@@ -429,8 +429,8 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
         receive_down(FirstMonitor, FirstEdgePid)
     ),
 
-    RetryTask = fun() ->
-        Parent ! {task_reexecuted, self()},
+    RetryTask = fun(#{parent := ParentEdgePid2}) ->
+        Parent ! {task_reexecuted, ParentEdgePid2},
         {ok, unexpected_result}
     end,
 
@@ -467,6 +467,65 @@ running_checkpoint_is_not_reexecuted_after_edge_restart_test() ->
     after 50 ->
         ok
     end.
+
+
+different_nodes_use_independent_checkpoints_test() ->
+    ok = hayata_task_store:ensure_started(),
+
+    AgentId = make_ref(),
+    ExecutionId = make_ref(),
+    EdgeId = make_ref(),
+
+    FirstMetadata = #{
+        agent_id => AgentId,
+        node_id => node_a
+    },
+    SecondMetadata = #{
+        agent_id => AgentId,
+        node_id => node_b
+    },
+
+    {ok, FirstEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        fun(_Context) -> {ok, result_a} end,
+        FirstMetadata
+    ),
+
+    FirstMonitor = erlang:monitor(process, FirstEdgePid),
+    ok = hayata_edge:execute(FirstEdgePid),
+
+    ?assertEqual(
+        {hayata_edge_result, EdgeId, ExecutionId, {ok, result_a}},
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(FirstMonitor, FirstEdgePid)
+    ),
+
+    {ok, SecondEdgePid} = hayata_edge:start(
+        self(),
+        undefined,
+        EdgeId,
+        ExecutionId,
+        fun(_Context) -> {ok, result_b} end,
+        SecondMetadata
+    ),
+
+    SecondMonitor = erlang:monitor(process, SecondEdgePid),
+    ok = hayata_edge:execute(SecondEdgePid),
+
+    ?assertEqual(
+        {hayata_edge_result, EdgeId, ExecutionId, {ok, result_b}},
+        receive_message()
+    ),
+    ?assertEqual(
+        normal,
+        receive_down(SecondMonitor, SecondEdgePid)
+    ).
 
 receive_message() ->
     receive
