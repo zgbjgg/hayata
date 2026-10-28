@@ -270,12 +270,20 @@ handle_info(
                         pending => Remaining,
                         results => Results
                     },
+                    CompletedState = emit_stream_event(
+                        State,
+                        node_completed,
+                        #{
+                            node_id => NodeId,
+                            execution_id => ExecutionId
+                        }
+                    ),
                     persist_parallel_result(
                         UpdatedTransition,
                         Remaining,
                         Results,
                         Transition,
-                        State
+                        CompletedState
                     );
                 {error, Reason} ->
                     FailedState = fail_invocation(Reason, State),
@@ -992,11 +1000,19 @@ start_parallel_node_executions([NodeId | Rest], Input, Transition, State) ->
                 self()
             ) of
                 {ok, ExecutionId} ->
+                    StartedState = emit_stream_event(
+                        PlannedState,
+                        node_started,
+                        #{
+                            node_id => NodeId,
+                            execution_id => ExecutionId
+                        }
+                    ),
                     start_parallel_node_executions(
                         Rest,
                         Input,
                         UpdatedTransition,
-                        PlannedState
+                        StartedState
                     );
                 {error, Reason} ->
                     Error = {node_execution_start_failed, NodeId, Reason},

@@ -3567,6 +3567,149 @@ run_options_stream_emits_node_lifecycle_test() ->
         end
     end).
 
+run_options_stream_emits_parallel_node_lifecycle_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            alpha => fun(_State) ->
+                #{alpha => completed}
+            end,
+            beta => fun(_State) ->
+                #{beta => completed}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, [alpha, beta], undefined};
+                2 -> {finish, maps:get(parallel_results, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        NodeStartedEvents = [
+            receive
+                {hayata_agent_event, StartNodeId, StartNodeEvent}
+                        when StartNodeId =:= InvocationId ->
+                    StartNodeEvent
+            after 1000 ->
+                error(node_started_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [2, 3],
+            lists:sort([
+                maps:get(sequence, Event)
+                || Event <- NodeStartedEvents
+            ])
+        ),
+
+        StartedByNode = maps:from_list([
+            begin
+                Data = maps:get(data, Event),
+                {
+                    maps:get(node_id, Data),
+                    maps:get(execution_id, Data)
+                }
+            end
+            || Event <- NodeStartedEvents
+        ]),
+
+        ?assertEqual(
+            [alpha, beta],
+            lists:sort(maps:keys(StartedByNode))
+        ),
+
+        NodeCompletedEvents = [
+            receive
+                {hayata_agent_event, CompleteNodeId, CompleteNodeEvent}
+                        when CompleteNodeId =:= InvocationId ->
+                    CompleteNodeEvent
+            after 2000 ->
+                error(node_completed_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [4, 5],
+            lists:sort([
+                maps:get(sequence, Event)
+                || Event <- NodeCompletedEvents
+            ])
+        ),
+
+        CompletedByNode = maps:from_list([
+            begin
+                Data = maps:get(data, Event),
+                {
+                    maps:get(node_id, Data),
+                    maps:get(execution_id, Data)
+                }
+            end
+            || Event <- NodeCompletedEvents
+        ]),
+
+        ?assertEqual(
+            lists:sort(maps:keys(StartedByNode)),
+            lists:sort(maps:keys(CompletedByNode))
+        ),
+
+        ?assertEqual(StartedByNode, CompletedByNode),
+
+        CompletedMessage = receive
+            {hayata_agent_event, CompleteId, CompleteEvent}
+                    when CompleteId =:= InvocationId ->
+                {CompleteId, CompleteEvent}
+        after 2000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        {_, InvocationCompletedEvent} = CompletedMessage,
+        ?assertEqual(
+            invocation_completed,
+            maps:get(type, InvocationCompletedEvent)
+        ),
+        ?assertEqual(6, maps:get(sequence, InvocationCompletedEvent)),
+
+        ResultMessage = receive
+            {hayata_agent_result, ResultId, Outcome}
+                    when ResultId =:= InvocationId ->
+                {ResultId, Outcome}
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        {_, Result} = ResultMessage,
+        ?assertMatch({ok, _}, Result)
+    end).
+
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
