@@ -100,6 +100,82 @@ definitions_exclude_handler_test() ->
     [Definition] = Definitions,
     ?assertEqual(false, maps:is_key(handler, Definition)).
 
+resolve_finds_tool_by_name_test() ->
+    {ok, Tool} = hayata_tool:resolve(
+        <<"get_weather">>,
+        [weather_tool()]
+    ),
+
+    ?assertEqual(<<"get_weather">>, maps:get(name, Tool)).
+
+resolve_rejects_unknown_tool_test() ->
+    ?assertEqual(
+        {error, {unknown_tool, <<"get_forecast">>}},
+        hayata_tool:resolve(
+            <<"get_forecast">>,
+            [weather_tool()]
+        )
+    ).
+
+execute_returns_handler_result_test() ->
+    ?assertEqual(
+        {ok, #{temperature => 22}},
+        hayata_tool:execute(
+            <<"get_weather">>,
+            #{city => <<"Mexico City">>},
+            [weather_tool()]
+        )
+    ).
+
+execute_rejects_missing_required_argument_test() ->
+    ?assertEqual(
+        {error, {invalid_arguments, {missing_required, <<"city">>}}},
+        hayata_tool:execute(
+            <<"get_weather">>,
+            #{},
+            [weather_tool()]
+        )
+    ).
+
+execute_rejects_unknown_argument_test() ->
+    ?assertEqual(
+        {error, {invalid_arguments, {unknown_property, <<"country">>}}},
+        hayata_tool:execute(
+            <<"get_weather">>,
+            #{
+                city => <<"Mexico City">>,
+                country => <<"Mexico">>
+            },
+            [weather_tool()]
+        )
+    ).
+
+execute_rejects_wrong_argument_type_test() ->
+    ?assertEqual(
+        {error, {invalid_arguments, {invalid_type, <<"city">>, string}}},
+        hayata_tool:execute(
+            <<"get_weather">>,
+            #{city => 123},
+            [weather_tool()]
+        )
+    ).
+
+execute_normalizes_handler_exception_test() ->
+    Tool = (weather_tool())#{
+        handler => fun(_Arguments) ->
+            erlang:error(weather_service_failed)
+        end
+    },
+
+    ?assertEqual(
+        {error, {handler_failed, <<"get_weather">>}},
+        hayata_tool:execute(
+            <<"get_weather">>,
+            #{city => <<"Mexico City">>},
+            [Tool]
+        )
+    ).
+
 -spec weather_tool() -> map().
 weather_tool() ->
     #{
