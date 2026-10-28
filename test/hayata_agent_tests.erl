@@ -2069,7 +2069,7 @@ inspects_completed_task_during_recovery_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         Result
     ),
 
@@ -2126,11 +2126,11 @@ inspects_parallel_tasks_during_recovery_test() ->
         Checkpoint
     ),
     ok = hayata_task_store:save_task_result(
-        {AgentId, FirstExecutionId, node_result},
+        {AgentId, first, FirstExecutionId, node_result},
         FirstResult
     ),
     {ok, execute} = hayata_task_store:claim_task(
-        {AgentId, SecondExecutionId, node_result},
+        {AgentId, second, SecondExecutionId, node_result},
         #{}
     ),
 
@@ -2342,7 +2342,7 @@ rejects_uncertain_task_recovery_test() ->
         Checkpoint
     ),
     {ok, execute} = hayata_task_store:claim_task(
-        {AgentId, ExecutionId, node_result},
+        {AgentId, work, ExecutionId, node_result},
         #{}
     ),
 

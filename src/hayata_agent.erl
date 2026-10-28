@@ -1184,6 +1184,7 @@ inspect_recovery_tasks(
     #{
         NodeId => inspect_recovery_task(
             AgentId,
+            NodeId,
             ExecutionId
         )
     };
@@ -1198,18 +1199,22 @@ inspect_recovery_tasks(
     }
 ) ->
     maps:map(
-        fun(_NodeId, ExecutionId) ->
-            inspect_recovery_task(AgentId, ExecutionId)
+        fun(NodeId, ExecutionId) ->
+            inspect_recovery_task(
+                AgentId,
+                NodeId,
+                ExecutionId
+            )
         end,
         Pending
     );
 inspect_recovery_tasks(_State) ->
     #{}.
 
--spec inspect_recovery_task(term(), reference()) -> term().
-inspect_recovery_task(AgentId, ExecutionId) ->
+-spec inspect_recovery_task(term(), atom(), reference()) -> term().
+inspect_recovery_task(AgentId, NodeId, ExecutionId) ->
     case hayata_task_store:inspect_task(
-        {AgentId, ExecutionId, node_result}
+        {AgentId, NodeId, ExecutionId, node_result}
     ) of
         {ok, not_started} ->
             not_started;
@@ -1230,6 +1235,7 @@ inspect_recovery_task(AgentId, ExecutionId) ->
 recover_node_execution(NodeId, ExecutionId, NodeInput, State) ->
     TaskKey = {
         State#agent_state.id,
+        NodeId,
         ExecutionId,
         node_result
     },
@@ -1332,8 +1338,8 @@ recover_parallel_execution(Transition, State) ->
     Pending = maps:get(pending, Transition),
     AgentId = State#agent_state.id,
     Inspections = maps:map(
-        fun(_NodeId, ExecutionId) ->
-            inspect_recovery_task(AgentId, ExecutionId)
+        fun(NodeId, ExecutionId) ->
+            inspect_recovery_task(AgentId, NodeId, ExecutionId)
         end,
         Pending
     ),
