@@ -1850,7 +1850,22 @@ emit_stream_event(State, _Type, _Data) ->
     reference(),
     #agent_state{}
 ) -> map().
-node_execution_context(
+node_execution_context(NodeInput, NodeId, ExecutionId, State) ->
+    Context = maybe_add_streamer(
+        NodeInput,
+        NodeId,
+        ExecutionId,
+        State
+    ),
+    maybe_add_llm(Context, State#agent_state.llm_config).
+
+-spec maybe_add_streamer(
+    map(),
+    atom(),
+    reference(),
+    #agent_state{}
+) -> map().
+maybe_add_streamer(
     NodeInput,
     NodeId,
     ExecutionId,
@@ -1879,8 +1894,17 @@ node_execution_context(
             {error, invalid_partial_result}
     end,
     maps:put(hayata_streamer, Streamer, NodeInput);
-node_execution_context(NodeInput, _NodeId, _ExecutionId, _State) ->
+maybe_add_streamer(NodeInput, _NodeId, _ExecutionId, _State) ->
     NodeInput.
+
+-spec maybe_add_llm(map(), undefined | map()) -> map().
+maybe_add_llm(Context, undefined) ->
+    Context;
+maybe_add_llm(Context, LLMConfig) when is_map(LLMConfig) ->
+    LLM = fun(Request) ->
+        hayata_llm:generate(LLMConfig, Request)
+    end,
+    maps:put(hayata_llm, LLM, Context).
 
 -spec active_node_execution(atom(), reference(), term()) -> boolean().
 active_node_execution(

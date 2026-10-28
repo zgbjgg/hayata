@@ -4102,6 +4102,66 @@ run_options_stream_rejects_stale_partial_result_test() ->
         end
     end).
 
+llm_is_available_to_node_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLM = maps:get(hayata_llm, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"Hello">>
+                            }
+                        ]
+                    }
+                ],
+                case LLM(#{messages => Messages}) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, ask_llm, undefined};
+                1 ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{
+                llm_response := #{
+                    message := #{
+                        role := assistant,
+                        content := [_ | _]
+                    },
+                    finish_reason := stop
+                }
+            },
+            Result
+        )
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
