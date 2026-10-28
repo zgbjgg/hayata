@@ -186,7 +186,6 @@ run_executes_multiple_tools_in_order_test() ->
         error(missing_tool_loop_messages)
     end.
 
-
 run_recovers_from_unknown_tool_test() ->
     Parent = self(),
 
@@ -230,6 +229,51 @@ run_recovers_from_unknown_tool_test() ->
             )
     after 1000 ->
         error(missing_unknown_tool_result)
+    end.
+
+run_recovers_from_invalid_tool_arguments_test() ->
+    Parent = self(),
+
+    LLM = fun(Request) ->
+        Messages = maps:get(messages, Request),
+
+        case length(Messages) of
+            1 ->
+                {ok, invalid_tool_arguments_response()};
+            _ ->
+                Parent ! {recovery_messages, Messages},
+                {ok, text_response(<<"The weather request was invalid.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [weather_tool()],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {recovery_messages, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+
+            ?assertEqual(tool, maps:get(role, ToolMessage)),
+            ?assertEqual(
+                <<"call_invalid_arguments">>,
+                maps:get(tool_call_id, ToolMessage)
+            ),
+
+            [Content] = maps:get(content, ToolMessage),
+            Error = json:decode(maps:get(text, Content)),
+
+            ?assertEqual(
+                <<"tool_execution_failed">>,
+                maps:get(<<"error">>, Error)
+            )
+    after 1000 ->
+        error(missing_invalid_arguments_result)
     end.
 
 -spec request() -> map().
@@ -356,6 +400,25 @@ unknown_tool_call_response() ->
                     id => <<"call_unknown">>,
                     name => <<"get_forecast">>,
                     arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    }.
+
+-spec invalid_tool_arguments_response() -> map().
+invalid_tool_arguments_response() ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_invalid_arguments">>,
+                    name => <<"get_weather">>,
+                    arguments => #{
+                        city => 123
+                    }
                 }
             ]
         },
