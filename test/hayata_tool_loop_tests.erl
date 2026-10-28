@@ -378,6 +378,48 @@ run_does_not_execute_tool_at_iteration_limit_test() ->
         ok
     end.
 
+run_propagates_llm_provider_error_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! tool_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(_Request) ->
+        {error, provider_unavailable}
+    end,
+
+    Result = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [Tool],
+        5
+    ),
+
+    ?assertEqual(
+        {error, {llm_failed, provider_unavailable}},
+        Result
+    ),
+
+    receive
+        tool_executed ->
+            error(tool_executed_after_provider_failure)
+    after 0 ->
+        ok
+    end.
+
 -spec request() -> map().
 request() ->
     #{
