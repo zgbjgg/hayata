@@ -1002,7 +1002,7 @@ run_with_subscription_notifies_success_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, InvocationId} =
-            hayata_agent:run(Agent, hello, self()),
+            hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         receive
             {hayata_agent_result, InvocationId, {ok, Result}} ->
@@ -1035,7 +1035,7 @@ run_with_subscription_notifies_timeout_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, InvocationId} =
-            hayata_agent:run(Agent, hello, self()),
+            hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         receive
             {node_execution_started, ExecutionPid} ->
@@ -1070,7 +1070,7 @@ run_with_subscription_notifies_initial_policy_exception_test() ->
     },
 
     with_agent(Config, fun(Agent) ->
-        Result = hayata_agent:run(Agent, hello, self()),
+        Result = hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         ?assertMatch(
             {error, {policy_exception, error, policy_failed, _}},
@@ -1093,8 +1093,8 @@ run_with_subscription_notifies_initial_policy_exception_test() ->
 
 run_with_invalid_subscription_test() ->
     ?assertEqual(
-        {error, invalid_subscription_pid},
-        hayata_agent:run(self(), hello, not_a_pid)
+        {error, invalid_subscriber},
+        hayata_agent:run(self(), hello, #{subscriber => not_a_pid})
     ).
 
 run_with_subscription_reuses_subscriber_test() ->
@@ -1110,7 +1110,7 @@ run_with_subscription_reuses_subscriber_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, FirstInvocation} =
-            hayata_agent:run(Agent, first, self()),
+            hayata_agent:run(Agent, first, #{subscriber => self()}),
 
         receive
             {hayata_agent_result, FirstInvocation, {ok, first}} ->
@@ -1120,7 +1120,7 @@ run_with_subscription_reuses_subscriber_test() ->
         end,
 
         {ok, SecondInvocation} =
-            hayata_agent:run(Agent, second, self()),
+            hayata_agent:run(Agent, second, #{subscriber => self()}),
 
         ?assertNotEqual(FirstInvocation, SecondInvocation),
 

@@ -43,7 +43,9 @@
     timeout_ref = undefined,
     invocation_start_time = undefined,
     parallel_results = undefined,
-    execution_starter = fun hayata_node:start_execution/6
+    execution_starter = fun hayata_node:start_execution/6,
+    stream_enabled = false,
+    stream_sequence = 0
 }).
 
 -type config() :: #{
@@ -64,15 +66,24 @@ start_link(Config) ->
 -spec run(gen_server:server_ref(), term()) ->
     {ok, reference()} | {error, term()}.
 run(Agent, Input) ->
-    gen_server:call(Agent, {run, Input, undefined}, 5000).
+    gen_server:call(Agent, {run, Input, undefined, false}, 5000).
 
--doc("Starts an asynchronous agent invocation and sends its terminal result to a subscription process.").
--spec run(gen_server:server_ref(), term(), pid()) ->
+-doc("Starts an asynchronous agent invocation with subscription options.").
+-spec run(gen_server:server_ref(), term(), map()) ->
     {ok, reference()} | {error, term()}.
-run(Agent, Input, SubscriptionPid) when is_pid(SubscriptionPid) ->
-    gen_server:call(Agent, {run, Input, SubscriptionPid}, 5000);
-run(_Agent, _Input, _SubscriptionPid) ->
-    {error, invalid_subscription_pid}.
+run(Agent, Input, Options) when is_map(Options) ->
+    case validate_run_options(Options) of
+        {ok, SubscriptionPid, StreamEnabled} ->
+            gen_server:call(
+                Agent,
+                {run, Input, SubscriptionPid, StreamEnabled},
+                5000
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+run(_Agent, _Input, _Options) ->
+    {error, invalid_run_options}.
 
 -doc("Returns the current agent context.").
 -spec get_state(gen_server:server_ref()) -> map().
@@ -141,11 +152,11 @@ init(Config) ->
 -spec handle_call(term(), gen_server:from(), #agent_state{}) ->
     {reply, term(), #agent_state{}} |
     {stop, term(), term(), #agent_state{}}.
-handle_call({run, _Input, _SubscriptionPid}, _From, #agent_state{status = running} = State) ->
+handle_call({run, _Input, _SubscriptionPid, _StreamEnabled}, _From, #agent_state{status = running} = State) ->
     {reply, {error, already_running}, State};
-handle_call({run, _Input, _SubscriptionPid}, _From, #agent_state{status = recovery_required} = State) ->
+handle_call({run, _Input, _SubscriptionPid, _StreamEnabled}, _From, #agent_state{status = recovery_required} = State) ->
     {reply, {error, recovery_required}, State};
-handle_call({run, Input, SubscriptionPid}, _From, State) ->
+handle_call({run, Input, SubscriptionPid, StreamEnabled}, _From, State) ->
     case prepare_invocation(State) of
         ok ->
             InvocationId = make_ref(),
@@ -162,7 +173,9 @@ handle_call({run, Input, SubscriptionPid}, _From, State) ->
                 last_error = undefined,
                 timeout_ref = undefined,
                 invocation_start_time = InvocationStartTime,
-                parallel_results = undefined
+                parallel_results = undefined,
+                stream_enabled = StreamEnabled,
+                stream_sequence = 0
             },
             case create_invocation_checkpoint(NewState) of
                 ok ->
@@ -1626,3 +1639,43 @@ ordered_pending_tasks(Transition) ->
      || NodeId <- NodeIds,
         {ok, ExecutionId} <- [maps:find(NodeId, Pending)]
     ].
+
+-spec validate_run_options(map()) ->
+    {ok, pid() | undefined, boolean()} | {error, term()}.
+validate_run_options(Options) ->
+    case validate_run_option_keys(maps:keys(Options)) of
+        ok ->
+            validate_run_subscription(
+                maps:get(subscriber, Options, undefined),
+                maps:get(stream, Options, false)
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec validate_run_option_keys([term()]) -> ok | {error, term()}.
+validate_run_option_keys([]) ->
+    ok;
+validate_run_option_keys([subscriber | Rest]) ->
+    validate_run_option_keys(Rest);
+validate_run_option_keys([stream | Rest]) ->
+    validate_run_option_keys(Rest);
+validate_run_option_keys([Key | _Rest]) ->
+    {error, {unknown_run_option, Key}}.
+
+-spec validate_run_subscription(term(), term()) ->
+    {ok, pid() | undefined, boolean()} | {error, term()}.
+validate_run_subscription(SubscriberPid, StreamEnabled)
+        when is_boolean(StreamEnabled) ->
+    case {SubscriberPid, StreamEnabled} of
+        {undefined, false} ->
+            {ok, undefined, false};
+        {Pid, _Stream} when is_pid(Pid) ->
+            {ok, Pid, StreamEnabled};
+        {undefined, true} ->
+            {error, subscriber_required_for_stream};
+        _ ->
+            {error, invalid_subscriber}
+    end;
+validate_run_subscription(_SubscriberPid, _StreamEnabled) ->
+    {error, invalid_stream_option}.
