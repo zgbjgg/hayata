@@ -152,33 +152,160 @@ hello_hayata:run().
 
 ## Invocation API
 
-Hayata supports two invocation APIs:
+Hayata supports asynchronous agent invocations with optional result
+notifications and event streaming.
 
--   `hayata_agent:run(AgentPid, Input)` starts an asynchronous
-    invocation and returns `{ok, InvocationId}`. Retrieve the result
-    later with `hayata_agent:get_result/1`.
--   `hayata_agent:run(AgentPid, Input, SubscriptionPid)` starts an
-    asynchronous invocation and sends the terminal result to the
-    subscription process.
+### Starting an invocation
 
-The subscription receives one of these messages:
+Start an invocation without a subscriber:
 
-``` erlang
+```erlang
+{ok, InvocationId} = hayata_agent:run(AgentPid, Input).
+```
+
+The invocation runs asynchronously. Use `hayata_agent:get_result/1`
+to retrieve the final outcome when it is available.
+
+To receive a terminal result notification, provide a subscriber PID:
+
+```erlang
+{ok, InvocationId} = hayata_agent:run(
+    AgentPid,
+    Input,
+    #{subscriber => self()}
+).
+```
+
+The subscriber receives one of these messages:
+
+```erlang
 {hayata_agent_result, InvocationId, {ok, Result}}
 {hayata_agent_result, InvocationId, {error, Reason}}
 ```
 
-`InvocationId` correlates the message with its invocation. Success,
-execution errors, and timeouts are reported through this message format.
-If an invocation is rejected before starting---for example, because the
-agent is already running---`run/3` returns an error without sending a
-terminal-result notification for that rejected request.
+`InvocationId` identifies the invocation. If the invocation is rejected
+before it starts, `run/3` returns an error instead of sending a terminal
+result notification for that request.
 
-The subscription argument must be a PID; otherwise, `run/3` returns
-`{error, invalid_subscription_pid}`.
+### Streaming events
 
-The decision policy controls execution flow: `{next, NodeId, Input}`
-schedules a node, and `{finish, Result}` ends the invocation.
+Enable streaming by setting `stream => true` and providing a subscriber:
+
+```erlang
+{ok, InvocationId} = hayata_agent:run(
+    AgentPid,
+    Input,
+    #{
+        subscriber => self(),
+        stream => true
+    }
+).
+```
+
+The subscriber receives streaming events in this format:
+
+```erlang
+{hayata_agent_event, InvocationId, Event}
+```
+
+Each `Event` is a map containing:
+
+- `type` — the event type.
+- `sequence` — a monotonically increasing sequence number within the
+  invocation.
+- `data` — event-specific information.
+
+The event types are:
+
+| Event type | Meaning | Data |
+|---|---|---|
+| `invocation_started` | The invocation has started. | Invocation input. |
+| `node_started` | A node execution has started. | `node_id`, `execution_id`. |
+| `node_partial_result` | A node has emitted a partial result. | `node_id`, `execution_id`, `edge_id`, `result`. |
+| `node_completed` | A node execution has completed. | `node_id`, `execution_id`. |
+| `invocation_completed` | The invocation completed successfully. | `result`. |
+| `invocation_failed` | The invocation failed. | `reason`. |
+
+Sequence numbers start at `1` for each invocation. In parallel
+transitions, lifecycle and partial-result events from different nodes
+may interleave. Use `node_id` and `execution_id` to associate events
+with their corresponding executions.
+
+Streaming events do not replace the terminal result notification.
+When streaming is enabled, the subscriber receives both
+`hayata_agent_event` messages and the traditional
+`hayata_agent_result` notification.
+
+### Emitting partial results from a node
+
+Node functions receive a context map as their single argument. When
+streaming is enabled, Hayata injects a `hayata_streamer` function into
+that context.
+
+The streamer accepts a map and emits a `node_partial_result` event:
+
+```erlang
+Node = fun(Context) ->
+    Streamer = maps:get(hayata_streamer, Context),
+
+    ok = Streamer(#{chunk => first}),
+    ok = Streamer(#{chunk => second}),
+
+    #{answer => 42}
+end.
+```
+
+A partial-result event has this shape:
+
+```erlang
+#{
+    type => node_partial_result,
+    sequence => 3,
+    data => #{
+        node_id => answer_node,
+        execution_id => ExecutionId,
+        edge_id => node_result,
+        result => #{chunk => first}
+    }
+}
+```
+
+The example sequence number is illustrative. Actual sequence numbers
+depend on the other events emitted during the invocation.
+
+The streamer accepts maps only. Passing a non-map returns
+`{error, invalid_partial_result}`. A partial result from an execution
+that is no longer active is rejected rather than emitted as a valid
+event.
+
+Partial results are notifications; they do not independently modify
+the agent's shared state or replace the node's final result. The node
+must still return its final result map as usual.
+
+The streamer synchronously submits the partial result to the agent.
+This allows the agent to publish the partial event before processing
+the node's terminal completion notification.
+
+### Streaming disabled
+
+Streaming is disabled by default. Existing invocations can continue
+to use `run/2` or subscribe to terminal results without enabling
+streaming.
+
+When streaming is disabled, `hayata_streamer` is not injected into the
+node context and no `hayata_agent_event` messages are emitted.
+
+### Run options
+
+`hayata_agent:run/3` accepts a map with these supported keys:
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `subscriber` | PID | `undefined` | Process that receives terminal notifications and, when enabled, stream events. |
+| `stream` | Boolean | `false` | Enables invocation events and partial-result streaming. |
+
+Streaming requires a subscriber. Unknown options, an invalid subscriber,
+or an invalid `stream` value return an error.
 
 ## Parallel node execution
 
