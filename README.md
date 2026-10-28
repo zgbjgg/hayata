@@ -120,7 +120,7 @@ run() ->
 run_agent(AgentSupPid) ->
     case hayata_agent_sup:agent(AgentSupPid) of
         {ok, AgentPid} ->
-            case hayata_agent:run(AgentPid, #{input => <<"Hello">>}, self()) of
+            case hayata_agent:run(AgentPid, #{input => <<"Hello">>}, #{subscriber => self()}) of
                 {ok, InvocationId} ->
                     await_result(InvocationId, 100);
                 {error, Reason} ->

@@ -95,7 +95,7 @@ decision_policy(Context) ->
 run_agent(AgentSupPid) ->
     case hayata_agent_sup:agent(AgentSupPid) of
         {ok, AgentPid} ->
-            case hayata_agent:run(AgentPid, start, self()) of
+            case hayata_agent:run(AgentPid, start, #{subscriber => self()}) of
                 {ok, InvocationId} ->
                     await_result(InvocationId, 100);
                 {error, Reason} ->

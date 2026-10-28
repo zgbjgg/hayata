@@ -90,7 +90,7 @@ contains_greeting(Message) ->
 run_agent(AgentSupPid, Message) ->
     case hayata_agent_sup:agent(AgentSupPid) of
         {ok, AgentPid} ->
-            case hayata_agent:run(AgentPid, Message, self()) of
+            case hayata_agent:run(AgentPid, Message, #{subscriber => self()}) of
                 {ok, InvocationId} ->
                     await_result(InvocationId, 100);
                 {error, Reason} ->

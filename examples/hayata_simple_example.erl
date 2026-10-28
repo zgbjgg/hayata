@@ -53,7 +53,7 @@ run_agent(AgentSupPid) ->
             case hayata_agent:run(
                 AgentPid,
                 #{input => <<"Hola">>},
-                self()
+                #{subscriber => self()}
             ) of
                 {ok, InvocationId} ->
                     await_result(InvocationId, 100);
