@@ -276,6 +276,66 @@ run_recovers_from_invalid_tool_arguments_test() ->
         error(missing_invalid_arguments_result)
     end.
 
+run_recovers_from_tool_handler_exception_test() ->
+    Parent = self(),
+
+    FailingTool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            erlang:error(weather_service_unavailable)
+        end
+    },
+
+    LLM = fun(Request) ->
+        Messages = maps:get(messages, Request),
+
+        case length(Messages) of
+            1 ->
+                {ok, tool_call_response()};
+            _ ->
+                Parent ! {recovery_messages, Messages},
+                {ok, text_response(<<"Weather service is unavailable.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [FailingTool],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {recovery_messages, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+
+            ?assertEqual(tool, maps:get(role, ToolMessage)),
+            ?assertEqual(
+                <<"call_123">>,
+                maps:get(tool_call_id, ToolMessage)
+            ),
+
+            [Content] = maps:get(content, ToolMessage),
+            Error = json:decode(maps:get(text, Content)),
+
+            ?assertEqual(
+                <<"tool_execution_failed">>,
+                maps:get(<<"error">>, Error)
+            )
+    after 1000 ->
+        error(missing_handler_exception_result)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
