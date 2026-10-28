@@ -155,6 +155,16 @@ generate_rejects_invalid_tool_calls_test() ->
         hayata_llm:generate(Config, valid_request())
     ).
 
+generate_rejects_missing_message_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => missing_message}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{

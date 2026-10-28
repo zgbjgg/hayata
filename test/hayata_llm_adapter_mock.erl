@@ -108,6 +108,15 @@ response(invalid_tool_call) ->
             ]
         },
         finish_reason => tool_calls
+    };
+response(missing_message) ->
+    #{
+        finish_reason => stop,
+        usage => #{
+            input_tokens => 1,
+            output_tokens => 1,
+            total_tokens => 2
+        }
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].
