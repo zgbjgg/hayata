@@ -112,6 +112,80 @@ tool_result_is_valid_json_test() ->
         json:decode(maps:get(text, Content))
     ).
 
+run_executes_multiple_tools_in_order_test() ->
+    Parent = self(),
+
+    LLM = fun(Request) ->
+        Messages = maps:get(messages, Request),
+
+        case length(Messages) of
+            1 ->
+                {ok, multiple_tool_calls_response()};
+            _ ->
+                Parent ! {tool_loop_messages, Messages},
+                {ok, text_response(<<"Weather and forecast retrieved.">>)}
+        end
+    end,
+
+    Tools = [
+        weather_tool(),
+        forecast_tool()
+    ],
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        Tools,
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {tool_loop_messages, Messages} ->
+            ?assertEqual(4, length(Messages)),
+
+            [_UserMessage, AssistantMessage, FirstTool, SecondTool] =
+                Messages,
+
+            ?assertEqual(
+                assistant,
+                maps:get(role, AssistantMessage)
+            ),
+
+            ?assertEqual(
+                <<"call_weather">>,
+                maps:get(tool_call_id, FirstTool)
+            ),
+            ?assertEqual(
+                <<"get_weather">>,
+                maps:get(name, FirstTool)
+            ),
+
+            ?assertEqual(
+                <<"call_forecast">>,
+                maps:get(tool_call_id, SecondTool)
+            ),
+            ?assertEqual(
+                <<"get_forecast">>,
+                maps:get(name, SecondTool)
+            ),
+
+            [FirstContent] = maps:get(content, FirstTool),
+            [SecondContent] = maps:get(content, SecondTool),
+
+            ?assertEqual(
+                #{<<"temperature">> => 22},
+                json:decode(maps:get(text, FirstContent))
+            ),
+            ?assertEqual(
+                #{<<"forecast">> => <<"sunny">>},
+                json:decode(maps:get(text, SecondContent))
+            )
+    after 1000 ->
+        error(missing_tool_loop_messages)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
@@ -178,5 +252,48 @@ weather_tool() ->
         },
         handler => fun(_Arguments) ->
             {ok, #{temperature => 22}}
+        end
+    }.
+
+
+-spec multiple_tool_calls_response() -> map().
+multiple_tool_calls_response() ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_weather">>,
+                    name => <<"get_weather">>,
+                    arguments => #{city => <<"Mexico City">>}
+                },
+                #{
+                    id => <<"call_forecast">>,
+                    name => <<"get_forecast">>,
+                    arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    }.
+
+-spec forecast_tool() -> map().
+forecast_tool() ->
+    #{
+        name => <<"get_forecast">>,
+        description => <<"Gets the forecast for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{
+                    type => string,
+                    description => <<"City to look up.">>
+                }
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            {ok, #{forecast => <<"sunny">>}}
         end
     }.
