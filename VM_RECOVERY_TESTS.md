@@ -1,8 +1,7 @@
 # VM Recovery Verification
 
 This document records the local, repeatable checks used to verify
-Hayata's durable task and invocation recovery on the
-`recovery_checkpoints` branch.
+Hayata's durable task and invocation recovery.
 
 These are manual integration checks, separate from EUnit. Each check
 starts a fresh Erlang VM for each phase and uses the same Mnesia
