@@ -3398,6 +3398,21 @@ run_options_stream_emits_invocation_failed_test() ->
         ),
         ?assertEqual(1, maps:get(sequence, StartedEvent)),
 
+        NodeStartedMessage = receive
+            {hayata_agent_event, NodeStartId, NodeStartEvent}
+                    when NodeStartId =:= InvocationId ->
+                {NodeStartId, NodeStartEvent}
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        {_, NodeStartedEvent} = NodeStartedMessage,
+        ?assertEqual(
+            node_started,
+            maps:get(type, NodeStartedEvent)
+        ),
+        ?assertEqual(2, maps:get(sequence, NodeStartedEvent)),
+
         FailedMessage = receive
             {hayata_agent_event, FailureId, FailureEvent}
                     when FailureId =:= InvocationId ->
@@ -3411,7 +3426,7 @@ run_options_stream_emits_invocation_failed_test() ->
             invocation_failed,
             maps:get(type, FailedEvent)
         ),
-        ?assertEqual(2, maps:get(sequence, FailedEvent)),
+        ?assertEqual(3, maps:get(sequence, FailedEvent)),
 
         ?assertMatch(
             #{
@@ -3441,6 +3456,115 @@ run_options_stream_emits_invocation_failed_test() ->
         {_, Result} = ResultMessage,
 
         ?assertMatch({error, {node_execution_failed, _}}, Result)
+    end).
+
+
+run_options_stream_emits_node_lifecycle_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        NodeStartedMessage = receive
+            {hayata_agent_event, NodeStartId, NodeStartEvent}
+                    when NodeStartId =:= InvocationId ->
+                {NodeStartId, NodeStartEvent}
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        {_, NodeStartedEvent} = NodeStartedMessage,
+        ?assertEqual(
+            node_started,
+            maps:get(type, NodeStartedEvent)
+        ),
+        ?assertEqual(2, maps:get(sequence, NodeStartedEvent)),
+
+        NodeStartedData = maps:get(data, NodeStartedEvent),
+        ?assertEqual(work, maps:get(node_id, NodeStartedData)),
+        ?assert(is_reference(maps:get(execution_id, NodeStartedData))),
+
+        NodeCompletedMessage = receive
+            {hayata_agent_event, NodeCompleteId, NodeCompleteEvent}
+                    when NodeCompleteId =:= InvocationId ->
+                {NodeCompleteId, NodeCompleteEvent}
+        after 1000 ->
+            error(node_completed_timeout)
+        end,
+
+        {_, NodeCompletedEvent} = NodeCompletedMessage,
+        ?assertEqual(
+            node_completed,
+            maps:get(type, NodeCompletedEvent)
+        ),
+        ?assertEqual(3, maps:get(sequence, NodeCompletedEvent)),
+
+        NodeCompletedData = maps:get(data, NodeCompletedEvent),
+        ?assertEqual(work, maps:get(node_id, NodeCompletedData)),
+        ?assertEqual(
+            maps:get(execution_id, NodeStartedData),
+            maps:get(execution_id, NodeCompletedData)
+        ),
+
+        CompletedMessage = receive
+            {hayata_agent_event, CompleteId, CompleteEvent}
+                    when CompleteId =:= InvocationId ->
+                {CompleteId, CompleteEvent}
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        {_, CompletedEvent} = CompletedMessage,
+        ?assertEqual(
+            invocation_completed,
+            maps:get(type, CompletedEvent)
+        ),
+        ?assertEqual(4, maps:get(sequence, CompletedEvent)),
+        ?assertEqual(
+            #{result => #{answer => 42}},
+            maps:get(data, CompletedEvent)
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
     end).
 
 await_terminal_status(_Agent, 0) ->

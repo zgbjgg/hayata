@@ -298,16 +298,25 @@ handle_info(
 ) ->
     case apply_node_result(FinalResult, State) of
         {ok, UpdatedState} ->
-            case persist_invocation_checkpoint(UpdatedState) of
+            CompletedState = emit_stream_event(
+                UpdatedState,
+                node_completed,
+                #{
+                    node_id => NodeId,
+                    execution_id => ExecutionId
+                }
+            ),
+
+            case persist_invocation_checkpoint(CompletedState) of
                 ok ->
-                    case evaluate_policy(UpdatedState) of
+                    case evaluate_policy(CompletedState) of
                         {ok, NextState} ->
                             {noreply, NextState};
                         {error, _Reason, NextState} ->
                             {noreply, NextState}
                     end;
                 {error, Reason} ->
-                    FailedState = fail_invocation(Reason, UpdatedState),
+                    FailedState = fail_invocation(Reason, CompletedState),
                     _ = persist_invocation_checkpoint(FailedState),
                     {noreply, FailedState}
             end;
@@ -585,7 +594,15 @@ start_checkpointed_node_execution(NodePid, NodeId, ExecutionId, Task, PlannedSta
         self()
     ) of
         {ok, ExecutionId} ->
-            {ok, PlannedState};
+            StartedState = emit_stream_event(
+                PlannedState,
+                node_started,
+                #{
+                    node_id => NodeId,
+                    execution_id => ExecutionId
+                }
+            ),
+            {ok, StartedState};
         {error, Reason} ->
             Error = {node_execution_start_failed, NodeId, Reason},
             FailedState = fail_invocation(Error, PlannedState),
