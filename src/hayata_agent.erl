@@ -46,7 +46,8 @@
     execution_starter = fun hayata_node:start_execution/6,
     stream_enabled = false,
     stream_sequence = 0,
-    llm_config = undefined
+    llm_config = undefined,
+    conversation_memory = false
 }).
 
 -type config() :: #{
@@ -55,7 +56,8 @@
     node_sup_pid := pid(),
     decision_policy => function(),
     state => map(),
-    max_steps => pos_integer()
+    max_steps => pos_integer(),
+    conversation_memory => boolean()
 }.
 
 -doc("Starts an agent coordinator.").
@@ -143,7 +145,8 @@ init(Config) ->
                     Config,
                     fun hayata_node:start_execution/6
                 ),
-                llm_config = maps:get(llm, Config, undefined)
+                llm_config = maps:get(llm, Config, undefined),
+                conversation_memory = maps:get(conversation_memory, Config, false)
             },
             {ok, restore_invocation_state(State)};
         {error, Reason} ->
@@ -165,7 +168,7 @@ handle_call({run, Input, SubscriptionPid, StreamEnabled}, _From, State) ->
             InvocationStartTime = erlang:monotonic_time(),
             NewState = State#agent_state{
                 status = running,
-                state = State#agent_state.initial_state,
+                state = invocation_initial_state(State),
                 current_step = 0,
                 invocation_id = InvocationId,
                 subscription_pid = SubscriptionPid,
@@ -452,15 +455,28 @@ validate_node_catalog([{NodeId, NodeFun} | Rest])
 validate_node_catalog([{NodeId, _NodeFun} | _Rest]) ->
     {error, {invalid_node_definition, NodeId}}.
 
-
--spec validate_agent_config(map(), map()) ->
-    ok | {error, term()}.
 validate_agent_config(Config, Nodes) ->
     case validate_node_catalog(Nodes) of
         ok ->
-            validate_llm_config(Config);
+            case validate_conversation_memory(Config) of
+                ok ->
+                    validate_llm_config(Config);
+                {error, _Reason} = Error ->
+                    Error
+            end;
         {error, _Reason} = Error ->
             Error
+    end.
+
+-spec validate_conversation_memory(map()) -> ok | {error, term()}.
+validate_conversation_memory(Config) ->
+    case maps:get(conversation_memory, Config, false) of
+        true ->
+            ok;
+        false ->
+            ok;
+        _ ->
+            {error, invalid_conversation_memory}
     end.
 
 -spec validate_llm_config(map()) -> ok | {error, term()}.
@@ -1927,3 +1943,16 @@ active_node_execution(
     end;
 active_node_execution(_NodeId, _ExecutionId, _ActiveExecution) ->
     false.
+
+-spec invocation_initial_state(#agent_state{}) -> map().
+invocation_initial_state(
+    #agent_state{
+        conversation_memory = true,
+        initial_state = InitialState,
+        state = CurrentState
+    }
+) ->
+    Messages = maps:with([messages], CurrentState),
+    maps:merge(InitialState, Messages);
+invocation_initial_state(#agent_state{initial_state = InitialState}) ->
+    InitialState.

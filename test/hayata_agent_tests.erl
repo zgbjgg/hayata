@@ -4162,6 +4162,94 @@ llm_is_available_to_node_test() ->
         )
     end).
 
+conversation_memory_preserves_messages_test() ->
+    Config = conversation_memory_test_config(true),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _} = hayata_agent:run(Agent, first),
+        await_status(Agent, completed, 100),
+
+        {ok, FirstResult} = hayata_agent:get_result(Agent),
+        ?assertEqual([first], maps:get(messages, FirstResult)),
+
+        {ok, _} = hayata_agent:run(Agent, second),
+        await_status(Agent, completed, 100),
+
+        {ok, SecondResult} = hayata_agent:get_result(Agent),
+        ?assertEqual(
+            [first, second],
+            maps:get(messages, SecondResult)
+        )
+    end).
+
+conversation_memory_disabled_resets_state_test() ->
+    Config = conversation_memory_test_config(false),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _} = hayata_agent:run(Agent, first),
+        await_status(Agent, completed, 100),
+
+        {ok, _} = hayata_agent:run(Agent, second),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertEqual([second], maps:get(messages, Result))
+    end).
+
+conversation_memory_does_not_preserve_transient_state_test() ->
+    Config = (conversation_memory_test_config(true))#{
+        state => #{
+            messages => [],
+            temporary => initial
+        },
+        nodes => #{
+            update_history => fun(Context) ->
+                Messages = maps:get(messages, Context, []),
+                Input = maps:get(input, Context),
+                #{
+                    messages => Messages ++ [Input],
+                    temporary => changed
+                }
+            end
+        }
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _} = hayata_agent:run(Agent, first),
+        await_status(Agent, completed, 100),
+
+        {ok, _} = hayata_agent:run(Agent, second),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertEqual([first, second], maps:get(messages, Result)),
+        ?assertEqual(changed, maps:get(temporary, Result))
+    end).
+
+conversation_memory_test_config(Enabled) ->
+    #{
+        id => make_ref(),
+        state => #{messages => [], temporary => initial},
+        conversation_memory => Enabled,
+        nodes => #{
+            update_history => fun(Context) ->
+                Messages = maps:get(messages, Context, []),
+                Input = maps:get(input, Context),
+                #{
+                    messages => Messages ++ [Input],
+                    temporary => changed
+                }
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, update_history, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    }.
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
