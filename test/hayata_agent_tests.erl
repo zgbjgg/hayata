@@ -1002,7 +1002,7 @@ run_with_subscription_notifies_success_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, InvocationId} =
-            hayata_agent:run(Agent, hello, self()),
+            hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         receive
             {hayata_agent_result, InvocationId, {ok, Result}} ->
@@ -1035,7 +1035,7 @@ run_with_subscription_notifies_timeout_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, InvocationId} =
-            hayata_agent:run(Agent, hello, self()),
+            hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         receive
             {node_execution_started, ExecutionPid} ->
@@ -1070,7 +1070,7 @@ run_with_subscription_notifies_initial_policy_exception_test() ->
     },
 
     with_agent(Config, fun(Agent) ->
-        Result = hayata_agent:run(Agent, hello, self()),
+        Result = hayata_agent:run(Agent, hello, #{subscriber => self()}),
 
         ?assertMatch(
             {error, {policy_exception, error, policy_failed, _}},
@@ -1093,8 +1093,8 @@ run_with_subscription_notifies_initial_policy_exception_test() ->
 
 run_with_invalid_subscription_test() ->
     ?assertEqual(
-        {error, invalid_subscription_pid},
-        hayata_agent:run(self(), hello, not_a_pid)
+        {error, invalid_subscriber},
+        hayata_agent:run(self(), hello, #{subscriber => not_a_pid})
     ).
 
 run_with_subscription_reuses_subscriber_test() ->
@@ -1110,7 +1110,7 @@ run_with_subscription_reuses_subscriber_test() ->
 
     with_agent(Config, fun(Agent) ->
         {ok, FirstInvocation} =
-            hayata_agent:run(Agent, first, self()),
+            hayata_agent:run(Agent, first, #{subscriber => self()}),
 
         receive
             {hayata_agent_result, FirstInvocation, {ok, first}} ->
@@ -1120,7 +1120,7 @@ run_with_subscription_reuses_subscriber_test() ->
         end,
 
         {ok, SecondInvocation} =
-            hayata_agent:run(Agent, second, self()),
+            hayata_agent:run(Agent, second, #{subscriber => self()}),
 
         ?assertNotEqual(FirstInvocation, SecondInvocation),
 
@@ -3183,6 +3183,925 @@ restores_active_invocation_after_supervisor_restart_test() ->
         exit(SecondSup, shutdown)
     end.
 
+run_options_subscriber_receives_terminal_result_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self()}
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_true_preserves_terminal_result_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{
+                subscriber => self(),
+                stream => true
+            }
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_false_is_accepted_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{
+                subscriber => self(),
+                stream => false
+            }
+        ),
+
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+run_options_stream_defaults_to_false_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self()}
+        ),
+
+        ?assertEqual(
+            {ok, #{answer => 42}},
+            hayata_agent:get_result(Agent)
+        )
+    end).
+
+run_options_rejects_invalid_subscriber_test() ->
+    ?assertEqual(
+        {error, invalid_subscriber},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{subscriber => not_a_pid}
+        )
+    ).
+
+run_options_rejects_stream_without_subscriber_test() ->
+    ?assertEqual(
+        {error, subscriber_required_for_stream},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{stream => true}
+        )
+    ).
+
+run_options_rejects_invalid_stream_value_test() ->
+    ?assertEqual(
+        {error, invalid_stream_option},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{
+                subscriber => self(),
+                stream => yes
+            }
+        )
+    ).
+
+run_options_rejects_unknown_option_test() ->
+    ?assertEqual(
+        {error, {unknown_run_option, unsupported}},
+        hayata_agent:run(
+            self(),
+            hello,
+            #{
+                subscriber => self(),
+                unsupported => true
+            }
+        )
+    ).
+
+run_options_rejects_non_map_test() ->
+    ?assertEqual(
+        {error, invalid_run_options},
+        hayata_agent:run(self(), hello, not_a_map)
+    ).
+
+
+run_options_stream_emits_invocation_lifecycle_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        receive
+            {hayata_agent_event, InvocationId, StartedEvent} ->
+                ?assertEqual(
+                    #{
+                        type => invocation_started,
+                        sequence => 1,
+                        data => #{}
+                    },
+                    StartedEvent
+                )
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, CompletedEvent} ->
+                ?assertEqual(
+                    invocation_completed,
+                    maps:get(type, CompletedEvent)
+                ),
+                ?assertEqual(2, maps:get(sequence, CompletedEvent)),
+                ?assertEqual(
+                    #{result => #{answer => 42}},
+                    maps:get(data, CompletedEvent)
+                )
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+
+run_options_stream_emits_invocation_failed_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                erlang:error(expected_failure)
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        NodeStartedMessage = receive
+            {hayata_agent_event, NodeStartId, NodeStartEvent}
+                    when NodeStartId =:= InvocationId ->
+                {NodeStartId, NodeStartEvent}
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        {_, NodeStartedEvent} = NodeStartedMessage,
+        ?assertEqual(
+            node_started,
+            maps:get(type, NodeStartedEvent)
+        ),
+        ?assertEqual(2, maps:get(sequence, NodeStartedEvent)),
+
+        FailedMessage = receive
+            {hayata_agent_event, FailureId, FailureEvent}
+                    when FailureId =:= InvocationId ->
+                {FailureId, FailureEvent}
+        after 1000 ->
+            error(invocation_failed_timeout)
+        end,
+
+        {_, FailedEvent} = FailedMessage,
+        ?assertEqual(
+            invocation_failed,
+            maps:get(type, FailedEvent)
+        ),
+        ?assertEqual(3, maps:get(sequence, FailedEvent)),
+
+        ?assertMatch(
+            #{
+                reason := {
+                    node_execution_failed,
+                    #{
+                        node_result := {
+                            node_exception,
+                            error,
+                            expected_failure,
+                            _
+                        }
+                    }
+                }
+            },
+            maps:get(data, FailedEvent)
+        ),
+
+        ResultMessage = receive
+            {hayata_agent_result, ResultId, Outcome}
+                    when ResultId =:= InvocationId ->
+                {ResultId, Outcome}
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        {_, Result} = ResultMessage,
+
+        ?assertMatch({error, {node_execution_failed, _}}, Result)
+    end).
+
+
+run_options_stream_emits_node_lifecycle_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        NodeStartedMessage = receive
+            {hayata_agent_event, NodeStartId, NodeStartEvent}
+                    when NodeStartId =:= InvocationId ->
+                {NodeStartId, NodeStartEvent}
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        {_, NodeStartedEvent} = NodeStartedMessage,
+        ?assertEqual(
+            node_started,
+            maps:get(type, NodeStartedEvent)
+        ),
+        ?assertEqual(2, maps:get(sequence, NodeStartedEvent)),
+
+        NodeStartedData = maps:get(data, NodeStartedEvent),
+        ?assertEqual(work, maps:get(node_id, NodeStartedData)),
+        ?assert(is_reference(maps:get(execution_id, NodeStartedData))),
+
+        NodeCompletedMessage = receive
+            {hayata_agent_event, NodeCompleteId, NodeCompleteEvent}
+                    when NodeCompleteId =:= InvocationId ->
+                {NodeCompleteId, NodeCompleteEvent}
+        after 1000 ->
+            error(node_completed_timeout)
+        end,
+
+        {_, NodeCompletedEvent} = NodeCompletedMessage,
+        ?assertEqual(
+            node_completed,
+            maps:get(type, NodeCompletedEvent)
+        ),
+        ?assertEqual(3, maps:get(sequence, NodeCompletedEvent)),
+
+        NodeCompletedData = maps:get(data, NodeCompletedEvent),
+        ?assertEqual(work, maps:get(node_id, NodeCompletedData)),
+        ?assertEqual(
+            maps:get(execution_id, NodeStartedData),
+            maps:get(execution_id, NodeCompletedData)
+        ),
+
+        CompletedMessage = receive
+            {hayata_agent_event, CompleteId, CompleteEvent}
+                    when CompleteId =:= InvocationId ->
+                {CompleteId, CompleteEvent}
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        {_, CompletedEvent} = CompletedMessage,
+        ?assertEqual(
+            invocation_completed,
+            maps:get(type, CompletedEvent)
+        ),
+        ?assertEqual(4, maps:get(sequence, CompletedEvent)),
+        ?assertEqual(
+            #{result => #{answer => 42}},
+            maps:get(data, CompletedEvent)
+        ),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_emits_parallel_node_lifecycle_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            alpha => fun(_State) ->
+                #{alpha => completed}
+            end,
+            beta => fun(_State) ->
+                #{beta => completed}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, [alpha, beta], undefined};
+                2 -> {finish, maps:get(parallel_results, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        NodeStartedEvents = [
+            receive
+                {hayata_agent_event, StartNodeId, StartNodeEvent}
+                        when StartNodeId =:= InvocationId ->
+                    StartNodeEvent
+            after 1000 ->
+                error(node_started_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [2, 3],
+            lists:sort([
+                maps:get(sequence, Event)
+                || Event <- NodeStartedEvents
+            ])
+        ),
+
+        StartedByNode = maps:from_list([
+            begin
+                Data = maps:get(data, Event),
+                {
+                    maps:get(node_id, Data),
+                    maps:get(execution_id, Data)
+                }
+            end
+            || Event <- NodeStartedEvents
+        ]),
+
+        ?assertEqual(
+            [alpha, beta],
+            lists:sort(maps:keys(StartedByNode))
+        ),
+
+        NodeCompletedEvents = [
+            receive
+                {hayata_agent_event, CompleteNodeId, CompleteNodeEvent}
+                        when CompleteNodeId =:= InvocationId ->
+                    CompleteNodeEvent
+            after 2000 ->
+                error(node_completed_timeout)
+            end
+            || _ <- [alpha, beta]
+        ],
+
+        ?assertEqual(
+            [4, 5],
+            lists:sort([
+                maps:get(sequence, Event)
+                || Event <- NodeCompletedEvents
+            ])
+        ),
+
+        CompletedByNode = maps:from_list([
+            begin
+                Data = maps:get(data, Event),
+                {
+                    maps:get(node_id, Data),
+                    maps:get(execution_id, Data)
+                }
+            end
+            || Event <- NodeCompletedEvents
+        ]),
+
+        ?assertEqual(
+            lists:sort(maps:keys(StartedByNode)),
+            lists:sort(maps:keys(CompletedByNode))
+        ),
+
+        ?assertEqual(StartedByNode, CompletedByNode),
+
+        CompletedMessage = receive
+            {hayata_agent_event, CompleteId, CompleteEvent}
+                    when CompleteId =:= InvocationId ->
+                {CompleteId, CompleteEvent}
+        after 2000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        {_, InvocationCompletedEvent} = CompletedMessage,
+        ?assertEqual(
+            invocation_completed,
+            maps:get(type, InvocationCompletedEvent)
+        ),
+        ?assertEqual(6, maps:get(sequence, InvocationCompletedEvent)),
+
+        ResultMessage = receive
+            {hayata_agent_result, ResultId, Outcome}
+                    when ResultId =:= InvocationId ->
+                {ResultId, Outcome}
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        {_, Result} = ResultMessage,
+        ?assertMatch({ok, _}, Result)
+    end).
+
+run_options_stream_emits_partial_node_results_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{chunk => first}),
+                ok = Streamer(#{chunk => second}),
+                #{answer => 42}
+           end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedEvent = receive
+            {hayata_agent_event, InvocationId, Event1} ->
+                Event1
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+
+        NodeStartedEvent = receive
+            {hayata_agent_event, InvocationId, Event2} ->
+                Event2
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+        ?assertEqual(
+            node_started,
+            maps:get(type, NodeStartedEvent)
+        ),
+
+        PartialEvents = [
+            receive
+                {hayata_agent_event, InvocationId, Event} ->
+                    Event
+            after 1000 ->
+                error(node_partial_result_timeout)
+            end
+            || _ <- [first, second]
+        ],
+
+        ?assertEqual(
+            [node_partial_result, node_partial_result],
+            [maps:get(type, Event) || Event <- PartialEvents]
+        ),
+
+        ?assertEqual(
+            [3, 4],
+            [maps:get(sequence, Event) || Event <- PartialEvents]
+        ),
+
+        ?assertEqual(
+            [#{chunk => first}, #{chunk => second}],
+            [
+                maps:get(result, maps:get(data, Event))
+                || Event <- PartialEvents
+            ]
+        ),
+
+        NodeCompletedEvent = receive
+            {hayata_agent_event, InvocationId, Event3} ->
+                Event3
+        after 1000 ->
+            error(node_completed_timeout)
+        end,
+        ?assertEqual(
+            node_completed,
+            maps:get(type, NodeCompletedEvent)
+        ),
+        ?assertEqual(5, maps:get(sequence, NodeCompletedEvent)),
+
+        InvocationCompletedEvent = receive
+            {hayata_agent_event, InvocationId, Event4} ->
+                Event4
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+        ?assertEqual(
+            invocation_completed,
+            maps:get(type, InvocationCompletedEvent)
+        ),
+        ?assertEqual(6, maps:get(sequence, InvocationCompletedEvent)),
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+run_options_stream_emits_parallel_partial_results_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            alpha => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{node => alpha, chunk => first}),
+                ok = Streamer(#{node => alpha, chunk => second}),
+                #{alpha => completed}
+            end,
+            beta => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{node => beta, chunk => first}),
+                #{beta => completed}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, [alpha, beta], undefined};
+                2 -> {finish, maps:get(parallel_results, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        PartialEvents = [
+            Event
+            || Event <- Events,
+               maps:get(type, Event) =:= node_partial_result
+        ],
+
+        ?assertEqual(3, length(PartialEvents)),
+
+        PartialData = [
+            maps:get(data, Event)
+            || Event <- PartialEvents
+        ],
+
+        AlphaEvents = [
+            Data
+            || Data <- PartialData,
+               maps:get(node_id, Data) =:= alpha
+        ],
+
+        BetaEvents = [
+            Data
+            || Data <- PartialData,
+               maps:get(node_id, Data) =:= beta
+        ],
+
+        ?assertEqual(2, length(AlphaEvents)),
+        ?assertEqual(1, length(BetaEvents)),
+
+        ?assertEqual(
+            [#{node => alpha, chunk => first},
+             #{node => alpha, chunk => second}],
+            [maps:get(result, Data) || Data <- AlphaEvents]
+        ),
+
+        ?assertEqual(
+            [#{node => beta, chunk => first}],
+            [maps:get(result, Data) || Data <- BetaEvents]
+        ),
+
+        AlphaExecutionIds = lists:usort([
+            maps:get(execution_id, Data)
+            || Data <- AlphaEvents
+        ]),
+        BetaExecutionIds = lists:usort([
+            maps:get(execution_id, Data)
+            || Data <- BetaEvents
+        ]),
+
+        ?assertEqual(1, length(AlphaExecutionIds)),
+        ?assertEqual(1, length(BetaExecutionIds)),
+        ?assertNotEqual(AlphaExecutionIds, BetaExecutionIds),
+
+        Sequences = [
+            maps:get(sequence, Event)
+            || Event <- Events
+        ],
+
+        ?assertEqual(
+            lists:seq(1, length(Events)),
+            Sequences
+        ),
+
+        NodeCompletedSequences = [
+            maps:get(sequence, Event)
+            || Event <- Events,
+               maps:get(type, Event) =:= node_completed
+        ],
+
+        PartialSequences = [
+            maps:get(sequence, Event)
+            || Event <- PartialEvents
+        ],
+
+        ?assert(lists:all(
+            fun(PartialSequence) ->
+                lists:any(
+                    fun(CompletedSequence) ->
+                        PartialSequence < CompletedSequence
+                    end,
+                    NodeCompletedSequences
+                )
+            end,
+            PartialSequences
+        ))
+    end).
+
+run_options_stream_disabled_does_not_inject_streamer_test() ->
+    Parent = self(),
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(Context) ->
+                Parent ! {
+                    streamer_available,
+                    maps:is_key(hayata_streamer, Context)
+                },
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => false}
+        ),
+
+        receive
+            {streamer_available, Available} ->
+                ?assertEqual(false, Available)
+        after 1000 ->
+            error(streamer_availability_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, _Event} ->
+                error(unexpected_stream_event)
+        after 100 ->
+            ok
+        end
+    end).
+
+run_options_stream_rejects_stale_partial_result_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(Context) ->
+                Streamer = maps:get(hayata_streamer, Context),
+                ok = Streamer(#{chunk => first}),
+                #{answer => 42}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        %% Consume the initial lifecycle events.
+        receive
+            {hayata_agent_event, InvocationId, Event1} ->
+                ?assertEqual(
+                    invocation_started,
+                    maps:get(type, Event1)
+                )
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event2} ->
+                ?assertEqual(
+                    node_started,
+                    maps:get(type, Event2)
+                )
+        after 1000 ->
+            error(node_started_timeout)
+        end,
+
+        %% Wait until the node has completed before submitting a stale
+        %% partial result. The execution reference is intentionally wrong.
+        receive
+            {hayata_agent_event, InvocationId, Event3} ->
+                ?assertEqual(
+                    node_partial_result,
+                    maps:get(type, Event3)
+                )
+        after 1000 ->
+            error(node_partial_result_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event4} ->
+                ?assertEqual(
+                    node_completed,
+                    maps:get(type, Event4)
+                )
+        after 1000 ->
+            error(node_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, Event5} ->
+                ?assertEqual(
+                    invocation_completed,
+                    maps:get(type, Event5)
+                )
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result0}} ->
+                ?assertEqual(#{answer => 42}, Result0)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        Result = gen_server:call(
+            Agent,
+            {
+                hayata_node_partial_result,
+                InvocationId,
+                work,
+                make_ref(),
+                node_result,
+                #{chunk => stale}
+            }
+        ),
+
+        ?assertEqual({error, stale_execution}, Result),
+
+        receive
+            {hayata_agent_event, InvocationId, Event6} ->
+                error({unexpected_event_after_stale_result, Event6})
+        after 100 ->
+            ok
+        end
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->
@@ -3256,4 +4175,27 @@ await_checkpoint_update(AgentId, InvocationId, PreviousUpdatedAt, Attempts) ->
             end;
         {error, Reason} ->
             error({checkpoint_read_failed, Reason})
+    end.
+
+run_options_test_config() ->
+    #{
+        id => make_ref(),
+        state => #{answer => 42},
+        nodes => #{
+            respond => fun(_State) -> #{} end
+        },
+        decision_policy => fun(Context) ->
+            {finish, maps:get(state, Context)}
+        end,
+        max_steps => 3
+    }.
+
+collect_stream_events(InvocationId, Acc) ->
+    receive
+        {hayata_agent_event, InvocationId, Event} ->
+            collect_stream_events(InvocationId, [Event | Acc]);
+        {hayata_agent_result, InvocationId, _Outcome} ->
+            lists:reverse(Acc)
+    after 3000 ->
+        error(stream_events_timeout)
     end.
