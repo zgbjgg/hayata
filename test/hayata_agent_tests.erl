@@ -3308,6 +3308,141 @@ run_options_rejects_non_map_test() ->
         {error, invalid_run_options},
         hayata_agent:run(self(), hello, not_a_map)
     ).
+
+
+run_options_stream_emits_invocation_lifecycle_test() ->
+    Config = run_options_test_config(),
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        receive
+            {hayata_agent_event, InvocationId, StartedEvent} ->
+                ?assertEqual(
+                    #{
+                        type => invocation_started,
+                        sequence => 1,
+                        data => #{}
+                    },
+                    StartedEvent
+                )
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        receive
+            {hayata_agent_event, InvocationId, CompletedEvent} ->
+                ?assertEqual(
+                    invocation_completed,
+                    maps:get(type, CompletedEvent)
+                ),
+                ?assertEqual(2, maps:get(sequence, CompletedEvent)),
+                ?assertEqual(
+                    #{result => #{answer => 42}},
+                    maps:get(data, CompletedEvent)
+                )
+        after 1000 ->
+            error(invocation_completed_timeout)
+        end,
+
+        receive
+            {hayata_agent_result, InvocationId, {ok, Result}} ->
+                ?assertEqual(#{answer => 42}, Result)
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end
+    end).
+
+
+run_options_stream_emits_invocation_failed_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_State) ->
+                erlang:error(expected_failure)
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            hello,
+            #{subscriber => self(), stream => true}
+        ),
+
+        StartedMessage = receive
+            {hayata_agent_event, StartId, StartEvent}
+                    when StartId =:= InvocationId ->
+                {StartId, StartEvent}
+        after 1000 ->
+            error(invocation_started_timeout)
+        end,
+
+        {_, StartedEvent} = StartedMessage,
+        ?assertEqual(
+            invocation_started,
+            maps:get(type, StartedEvent)
+        ),
+        ?assertEqual(1, maps:get(sequence, StartedEvent)),
+
+        FailedMessage = receive
+            {hayata_agent_event, FailureId, FailureEvent}
+                    when FailureId =:= InvocationId ->
+                {FailureId, FailureEvent}
+        after 1000 ->
+            error(invocation_failed_timeout)
+        end,
+
+        {_, FailedEvent} = FailedMessage,
+        ?assertEqual(
+            invocation_failed,
+            maps:get(type, FailedEvent)
+        ),
+        ?assertEqual(2, maps:get(sequence, FailedEvent)),
+
+        ?assertMatch(
+            #{
+                reason := {
+                    node_execution_failed,
+                    #{
+                        node_result := {
+                            node_exception,
+                            error,
+                            expected_failure,
+                            _
+                        }
+                    }
+                }
+            },
+            maps:get(data, FailedEvent)
+        ),
+
+        ResultMessage = receive
+            {hayata_agent_result, ResultId, Outcome}
+                    when ResultId =:= InvocationId ->
+                {ResultId, Outcome}
+        after 1000 ->
+            error(terminal_result_notification_timeout)
+        end,
+
+        {_, Result} = ResultMessage,
+
+        ?assertMatch({error, {node_execution_failed, _}}, Result)
+    end).
+
 await_terminal_status(_Agent, 0) ->
     error(agent_terminal_status_timeout);
 await_terminal_status(Agent, Attempts) ->

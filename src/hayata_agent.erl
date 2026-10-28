@@ -808,8 +808,9 @@ cancel_parallel_executions(AgentId, [{NodeId, ExecutionId} | Rest], State) ->
 -spec notify_invocation_result(#agent_state{}, term()) ->
     #agent_state{}.
 notify_invocation_result(#agent_state{invocation_id = InvocationId, subscription_pid = SubscriptionPid} = State, Outcome) when is_pid(SubscriptionPid) ->
+    StreamState = emit_terminal_stream_event(State, Outcome),
     SubscriptionPid ! {hayata_agent_result, InvocationId, Outcome},
-    State#agent_state{subscription_pid = undefined};
+    StreamState#agent_state{subscription_pid = undefined};
 notify_invocation_result(State, _Outcome) ->
     State.
 
@@ -1034,7 +1035,12 @@ start_persisted_invocation(State) ->
                 TimedState#agent_state.id,
                 InvocationId
             ),
-            evaluate_persisted_invocation(TimedState);
+            StartedState = emit_stream_event(
+                TimedState,
+                invocation_started,
+                #{}
+            ),
+            evaluate_persisted_invocation(StartedState);
         {error, Reason} ->
             _ = erlang:cancel_timer(TimeoutRef),
             {reply, {error, Reason}, State}
@@ -1679,3 +1685,44 @@ validate_run_subscription(SubscriberPid, StreamEnabled)
     end;
 validate_run_subscription(_SubscriberPid, _StreamEnabled) ->
     {error, invalid_stream_option}.
+
+-spec emit_terminal_stream_event(#agent_state{}, term()) ->
+    #agent_state{}.
+emit_terminal_stream_event(State, {ok, Result}) ->
+    emit_stream_event(
+        State,
+        invocation_completed,
+        #{result => Result}
+    );
+emit_terminal_stream_event(State, {error, Reason}) ->
+    emit_stream_event(
+        State,
+        invocation_failed,
+        #{reason => Reason}
+    );
+emit_terminal_stream_event(State, _Outcome) ->
+    State.
+
+-spec emit_stream_event(#agent_state{}, atom(), map()) ->
+    #agent_state{}.
+emit_stream_event(
+    #agent_state{
+        stream_enabled = true,
+        stream_sequence = Sequence,
+        subscription_pid = SubscriberPid,
+        invocation_id = InvocationId
+    } = State,
+    Type,
+    Data
+) when is_pid(SubscriberPid) ->
+    NextSequence = Sequence + 1,
+    ok = hayata_stream:flush(
+        SubscriberPid,
+        InvocationId,
+        Type,
+        NextSequence,
+        Data
+    ),
+    State#agent_state{stream_sequence = NextSequence};
+emit_stream_event(State, _Type, _Data) ->
+    State.
