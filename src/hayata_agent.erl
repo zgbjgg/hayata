@@ -45,7 +45,8 @@
     parallel_results = undefined,
     execution_starter = fun hayata_node:start_execution/6,
     stream_enabled = false,
-    stream_sequence = 0
+    stream_sequence = 0,
+    llm_config = undefined
 }).
 
 -type config() :: #{
@@ -141,7 +142,8 @@ init(Config) ->
                     execution_starter,
                     Config,
                     fun hayata_node:start_execution/6
-                )
+                ),
+                llm_config = maps:get(llm, Config, undefined)
             },
             {ok, restore_invocation_state(State)};
         {error, Reason} ->
@@ -425,11 +427,11 @@ validate_config(Config) when is_map(Config) ->
                      MaxSteps > 0,
                      is_map(InitialState),
                      ExecutionTime > 0 ->
-            validate_node_catalog(Nodes);
+            validate_agent_config(Config, Nodes);
         {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
          error, error, error, error}
                 when is_map(Nodes), is_pid(NodeSupPid), is_pid(SupervisorPid) ->
-            validate_node_catalog(Nodes);
+            validate_agent_config(Config, Nodes);
         _ ->
             {error, invalid_config}
     end;
@@ -449,6 +451,33 @@ validate_node_catalog([{NodeId, NodeFun} | Rest])
     validate_node_catalog(Rest);
 validate_node_catalog([{NodeId, _NodeFun} | _Rest]) ->
     {error, {invalid_node_definition, NodeId}}.
+
+
+-spec validate_agent_config(map(), map()) ->
+    ok | {error, term()}.
+validate_agent_config(Config, Nodes) ->
+    case validate_node_catalog(Nodes) of
+        ok ->
+            validate_llm_config(Config);
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+-spec validate_llm_config(map()) -> ok | {error, term()}.
+validate_llm_config(Config) ->
+    case maps:find(llm, Config) of
+        error ->
+            ok;
+        {ok, undefined} ->
+            ok;
+        {ok, LLMConfig} ->
+            case hayata_llm:validate_config(LLMConfig) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    {error, {invalid_llm_config, Reason}}
+            end
+    end.
 
 -spec prepare_invocation(#agent_state{}) -> ok | {error, term()}.
 prepare_invocation(#agent_state{status = ready}) ->
