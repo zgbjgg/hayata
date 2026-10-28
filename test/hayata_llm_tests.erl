@@ -126,6 +126,35 @@ generate_stream_rejects_invalid_consumer_test() ->
         )
     ).
 
+generate_preserves_tool_calls_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => tool_call}
+    },
+
+    {ok, Response} = hayata_llm:generate(Config, valid_request()),
+
+    ?assertEqual(tool_calls, maps:get(finish_reason, Response)),
+
+    Message = maps:get(message, Response),
+    [ToolCall] = maps:get(tool_calls, Message),
+
+    ?assertEqual(<<"call_123">>, maps:get(id, ToolCall)),
+    ?assertEqual(<<"get_weather">>, maps:get(name, ToolCall)),
+    ?assertEqual(
+        #{city => <<"Mexico City">>},
+        maps:get(arguments, ToolCall)
+    ).
+
+generate_rejects_invalid_tool_calls_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => invalid_tool_call}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{

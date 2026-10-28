@@ -221,12 +221,44 @@ validate_response(#{message := Message,
         maps:get(content, Message, undefined)
     } of
         {assistant, Content} when is_list(Content) ->
-            {ok, Response};
+            case validate_tool_calls(Message) of
+                ok ->
+                    {ok, Response};
+               {error, _Reason} ->
+                    {error, #{code => invalid_response}}
+            end;
         _ ->
             {error, #{code => invalid_response}}
     end;
 validate_response(_Response) ->
     {error, #{code => invalid_response}}.
+
+-spec validate_tool_calls(map()) -> ok | {error, invalid_tool_calls}.
+validate_tool_calls(Message) ->
+    case maps:find(tool_calls, Message) of
+        error ->
+            ok;
+        {ok, ToolCalls} when is_list(ToolCalls) ->
+            validate_tool_calls_list(ToolCalls);
+        {ok, _ToolCalls} ->
+            {error, invalid_tool_calls}
+    end.
+
+-spec validate_tool_calls_list([map()]) -> ok | {error, invalid_tool_calls}.
+validate_tool_calls_list([]) ->
+    ok;
+validate_tool_calls_list([
+    #{
+        id := Id,
+        name := Name,
+        arguments := Arguments
+    } | Rest
+]) when is_binary(Id), byte_size(Id) > 0,
+         is_binary(Name), byte_size(Name) > 0,
+         is_map(Arguments) ->
+    validate_tool_calls_list(Rest);
+validate_tool_calls_list(_ToolCalls) ->
+    {error, invalid_tool_call}.
 
 -spec forward_stream_event(term(), hayata_llm_adapter:consumer()) ->
     ok | {error, term()}.

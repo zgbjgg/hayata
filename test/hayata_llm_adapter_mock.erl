@@ -30,14 +30,15 @@ capabilities(_Config) ->
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
-generate(Request, _Config) when is_map(Request) ->
+generate(Request, Config) when is_map(Request) ->
     case {
         maps:find(model, Request),
         maps:find(messages, Request)
     } of
         {{ok, Model}, {ok, Messages}}
                 when is_binary(Model), is_list(Messages) ->
-            {ok, response()};
+            ResponseMode = maps:get(response_mode, Config, text),
+            {ok, response(ResponseMode)};
         _ ->
             {error, #{code => invalid_request}}
     end;
@@ -59,8 +60,8 @@ generate_stream(Request, Config, Consumer)
 generate_stream(_Request, _Config, _Consumer) ->
     {error, #{code => invalid_request}}.
 
--spec response() -> hayata_llm_adapter:response().
-response() ->
+-spec response(atom()) -> hayata_llm_adapter:response().
+response(text) ->
     #{
         message => #{
             role => assistant,
@@ -77,6 +78,36 @@ response() ->
             output_tokens => 4,
             total_tokens => 5
         }
+    };
+response(tool_call) ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_123">>,
+                    name => <<"get_weather">>,
+                    arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    };
+response(invalid_tool_call) ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_123">>,
+                    name => <<"get_weather">>,
+                    arguments => <<"not a map">>
+                }
+            ]
+        },
+        finish_reason => tool_calls
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].
