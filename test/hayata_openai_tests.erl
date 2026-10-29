@@ -588,6 +588,94 @@ http_stream_failure_notifies_consumer_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_completed_response_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_stream\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Hello\","
+        "\"output_index\":0,\"content_index\":0}\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{"
+        "\"id\":\"resp_stream\","
+        "\"status\":\"completed\","
+        "\"output\":[{"
+        "\"type\":\"message\","
+        "\"content\":[{"
+        "\"type\":\"output_text\","
+        "\"text\":\"Hello\""
+        "}]}]}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {ok, #{
+                message => #{
+                    role => assistant,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                },
+                finish_reason => stop,
+                id => <<"resp_stream">>
+            }},
+            Result
+        ),
+
+        EventTypes = receive_stream_event_types(4, []),
+
+        ?assertEqual(
+            [
+                message_started,
+                content_delta,
+                message_completed,
+                generation_completed
+            ],
+            EventTypes
+        ),
+
+        receive
+            {http_request, _RequestLine, _Headers, Body} ->
+                Payload = json:decode(Body),
+                ?assertEqual(true, maps:get(<<"stream">>, Payload))
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+-spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
+receive_stream_event_types(0, Acc) ->
+    lists:reverse(Acc);
+receive_stream_event_types(Count, Acc) ->
+    receive
+        {stream_event, Event} ->
+            receive_stream_event_types(
+                Count - 1,
+                [maps:get(type, Event) | Acc]
+            )
+    after 5000 ->
+        error(stream_event_not_received)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{

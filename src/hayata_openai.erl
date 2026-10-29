@@ -228,7 +228,8 @@ send_stream_request(Payload, ApiKey, Config, Consumer) ->
         {"authorization", "Bearer " ++ binary_to_list(ApiKey)},
         {"accept", "text/event-stream"}
     ],
-    Body = iolist_to_binary(json:encode(Payload)),
+    StreamPayload = Payload#{<<"stream">> => true},
+    Body = iolist_to_binary(json:encode(StreamPayload)),
     HttpOptions = [
         {timeout, Timeout},
         {connect_timeout, Timeout},
