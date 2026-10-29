@@ -165,6 +165,16 @@ generate_rejects_missing_message_test() ->
         hayata_llm:generate(Config, valid_request())
     ).
 
+generate_rejects_invalid_message_role_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => invalid_message_role}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{

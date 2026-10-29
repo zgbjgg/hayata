@@ -117,6 +117,19 @@ response(missing_message) ->
             output_tokens => 1,
             total_tokens => 2
         }
+    };
+response(invalid_message_role) ->
+    #{
+        message => #{
+            role => user,
+            content => [
+                #{
+                    type => text,
+                    text => <<"This role is invalid for a response.">>
+                }
+            ]
+        },
+        finish_reason => stop
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].
