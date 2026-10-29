@@ -668,6 +668,61 @@ http_stream_completed_response_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_consumer_cancellation_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_cancelled\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Hello\","
+        "\"output_index\":0,\"content_index\":0}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        {error, consumer_stopped}
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{
+                code => cancelled,
+                reason => consumer_stopped
+            }},
+            Result
+        ),
+
+        receive
+            {stream_event, Event} ->
+                ?assertEqual(
+                    message_started,
+                    maps:get(type, Event)
+                )
+        after 5000 ->
+            error(message_started_event_not_received)
+        end,
+
+        receive
+            {stream_event, _UnexpectedEvent} ->
+                error(event_received_after_cancellation)
+        after 100 ->
+            ok
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
