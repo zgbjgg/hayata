@@ -334,6 +334,11 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
         case Cancellation of
             undefined ->
                 normalize_stream_result(AdapterResult);
+            {adapter_error, invalid_stream_event} ->
+                {error, #{
+                    code => invalid_response,
+                    reason => invalid_stream_event
+                }};
             Reason ->
                 {error, #{
                     code => cancelled,
@@ -416,10 +421,12 @@ deliver_stream_event(
         true ->
             deliver_to_consumer(Event, Consumer);
         false ->
-            {{error, invalid_stream_event}, undefined}
+            {{error, invalid_stream_event},
+                {adapter_error, invalid_stream_event}}
     end;
 deliver_stream_event(_Event, _Consumer) ->
-    {{error, invalid_stream_event}, undefined}.
+    {{error, invalid_stream_event},
+        {adapter_error, invalid_stream_event}}.
 
 -spec deliver_to_consumer(
     map(),

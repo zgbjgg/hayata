@@ -474,6 +474,37 @@ generate_stream_waits_for_in_flight_callback_test() ->
         error(stream_did_not_finish)
     end.
 
+generate_stream_rejects_invalid_event_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_invalid_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
