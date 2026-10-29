@@ -367,6 +367,74 @@ http_gateway_timeout_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+parse_sse_fragmented_event_test() ->
+    State = #{buffer => <<>>, event => undefined, data => []},
+
+    {Events1, State1} = hayata_openai:parse_sse_chunk(
+        <<"event: response.created\r\ndata: {\"id\":">>,
+        State
+    ),
+
+    ?assertEqual([], Events1),
+
+    {Events2, State2} = hayata_openai:parse_sse_chunk(
+        <<"\"resp_1\"}\r\n\r\n">>,
+        State1
+    ),
+
+    Expected = [
+        #{
+            event => <<"response.created">>,
+            data => <<"{\"id\":\"resp_1\"}">>
+        }
+    ],
+
+    ?assertEqual(Expected, Events2),
+    ?assertEqual(<<>>, maps:get(buffer, State2)).
+
+parse_sse_multiple_events_test() ->
+    State = #{buffer => <<>>, event => undefined, data => []},
+    Chunk = <<
+        "event: first\n",
+        "data: one\n",
+        "\n",
+        "event: second\n",
+        "data: two\n",
+        "\n"
+    >>,
+
+    {Events, _State1} = hayata_openai:parse_sse_chunk(Chunk, State),
+
+    ?assertEqual(
+        [
+            #{event => <<"first">>, data => <<"one">>},
+            #{event => <<"second">>, data => <<"two">>}
+        ],
+        Events
+    ).
+
+parse_sse_multiline_data_test() ->
+    State = #{buffer => <<>>, event => undefined, data => []},
+    Chunk = <<"data: first\ndata: second\n\n">>,
+
+    {Events, _State1} = hayata_openai:parse_sse_chunk(Chunk, State),
+
+    ?assertEqual(
+        [#{event => <<"message">>, data => <<"first\nsecond">>}],
+        Events
+    ).
+
+parse_sse_ignores_comments_test() ->
+    State = #{buffer => <<>>, event => undefined, data => []},
+    Chunk = <<": keep-alive\n", "data: hello\n\n">>,
+
+    {Events, _State1} = hayata_openai:parse_sse_chunk(Chunk, State),
+
+    ?assertEqual(
+        [#{event => <<"message">>, data => <<"hello">>}],
+        Events
+    ).
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{

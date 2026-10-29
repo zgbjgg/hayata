@@ -8,6 +8,10 @@
     generate/2
 ]).
 
+-ifdef(TEST).
+-export([parse_sse_chunk/2]).
+-endif.
+
 -define(DEFAULT_BASE_URL, <<"https://api.openai.com/v1">>).
 -define(DEFAULT_TIMEOUT, 30000).
 
@@ -278,3 +282,107 @@ normalize_http_error(Status, _Body) when Status >= 500 ->
     {error, #{code => provider_error}};
 normalize_http_error(_Status, _Body) ->
     {error, #{code => provider_error}}.
+
+-spec parse_sse_chunk(binary(), map()) ->
+    {[map()], map()}.
+parse_sse_chunk(Chunk, State) when is_binary(Chunk), is_map(State) ->
+    Buffer = maps:get(buffer, State, <<>>),
+    Data = <<Buffer/binary, Chunk/binary>>,
+    split_sse_lines(Data, State#{buffer => <<>>}, []).
+
+-spec split_sse_lines(binary(), map(), [map()]) ->
+    {[map()], map()}.
+split_sse_lines(Buffer, State, Acc) ->
+    case binary:match(Buffer, <<"\n">>) of
+        {Position, 1} ->
+            Line0 = binary:part(Buffer, 0, Position),
+            RestStart = Position + 1,
+            Rest = binary:part(
+                Buffer,
+                RestStart,
+                byte_size(Buffer) - RestStart
+            ),
+            Line = strip_sse_carriage_return(Line0),
+            {Events, NextState} = process_sse_line(Line, State),
+            split_sse_lines(
+                Rest,
+                NextState,
+                lists:reverse(Events) ++ Acc
+            );
+        nomatch ->
+            {lists:reverse(Acc), State#{buffer => Buffer}}
+    end.
+
+-spec strip_sse_carriage_return(binary()) -> binary().
+strip_sse_carriage_return(Line) ->
+    case byte_size(Line) of
+        0 ->
+            Line;
+        Size ->
+            case binary:at(Line, Size - 1) of
+                $\r -> binary:part(Line, 0, Size - 1);
+                _ -> Line
+            end
+    end.
+
+-spec process_sse_line(binary(), map()) ->
+    {[map()], map()}.
+process_sse_line(<<>>, State) ->
+    dispatch_sse_event(State);
+process_sse_line(<<":", _Comment/binary>>, State) ->
+    {[], State};
+process_sse_line(Line, State) ->
+    {Field, Value} = split_sse_field(Line),
+    update_sse_field(Field, Value, State).
+
+-spec split_sse_field(binary()) -> {binary(), binary()}.
+split_sse_field(Line) ->
+    case binary:match(Line, <<":">>) of
+        {Position, 1} ->
+            Field = binary:part(Line, 0, Position),
+            ValueStart = Position + 1,
+            Value0 = binary:part(
+                Line,
+                ValueStart,
+                byte_size(Line) - ValueStart
+            ),
+            Value = remove_sse_leading_space(Value0),
+            {Field, Value};
+        nomatch ->
+            {Line, <<>>}
+    end.
+
+-spec remove_sse_leading_space(binary()) -> binary().
+remove_sse_leading_space(<<" ", Rest/binary>>) ->
+    Rest;
+remove_sse_leading_space(Value) ->
+    Value.
+
+-spec update_sse_field(binary(), binary(), map()) ->
+    {[map()], map()}.
+update_sse_field(<<"event">>, Value, State) ->
+    {[], State#{event => Value}};
+update_sse_field(<<"data">>, Value, State) ->
+    Data = maps:get(data, State, []),
+    {[], State#{data => [Value | Data]}};
+update_sse_field(_Field, _Value, State) ->
+    {[], State}.
+
+-spec dispatch_sse_event(map()) -> {[map()], map()}.
+dispatch_sse_event(State) ->
+    Data = maps:get(data, State, []),
+    Event = maps:get(event, State, undefined),
+    NextState = State#{event => undefined, data => []},
+    case Data of
+        [] ->
+            {[], NextState};
+        _ ->
+            Name = case Event of
+                undefined -> <<"message">>;
+                _ -> Event
+            end,
+            Payload = iolist_to_binary(
+                lists:join(<<"\n">>, lists:reverse(Data))
+            ),
+            {[#{event => Name, data => Payload}], NextState}
+    end.
