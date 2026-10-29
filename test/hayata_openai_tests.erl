@@ -210,6 +210,30 @@ http_invalid_json_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+invalid_base_url_test() ->
+    ?assertEqual(
+        {error, #{code => invalid_request}},
+        hayata_openai:generate(
+            valid_request(),
+            #{
+                api_key => <<"test-key">>,
+                base_url => 123
+            }
+        )
+    ).
+
+invalid_timeout_test() ->
+    ?assertEqual(
+        {error, #{code => invalid_request}},
+        hayata_openai:generate(
+            valid_request(),
+            #{
+                api_key => <<"test-key">>,
+                timeout => 0
+            }
+        )
+    ).
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{

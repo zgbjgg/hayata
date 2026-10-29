@@ -34,17 +34,42 @@ capabilities(_Config) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 generate(Request, Config) ->
-    case maps:find(api_key, Config) of
-        {ok, ApiKey} when is_binary(ApiKey), byte_size(ApiKey) > 0 ->
-            case prepare_payload(Request) of
-                {ok, Payload} ->
-                    send_request(Payload, ApiKey, Config);
-                {error, _Reason} ->
-                    {error, #{code => invalid_request}}
+    case validate_provider_config(Config) of
+        ok ->
+            case maps:find(api_key, Config) of
+                {ok, ApiKey}
+                        when is_binary(ApiKey),
+                             byte_size(ApiKey) > 0 ->
+                    case prepare_payload(Request) of
+                        {ok, Payload} ->
+                            send_request(Payload, ApiKey, Config);
+                        {error, _Reason} ->
+                            {error, #{code => invalid_request}}
+                    end;
+                _ ->
+                    {error, #{code => authentication}}
             end;
-        _ ->
-            {error, #{code => authentication}}
+        {error, _Reason} ->
+            {error, #{code => invalid_request}}
     end.
+
+-spec validate_provider_config(map()) -> ok | {error, term()}.
+validate_provider_config(Config) when is_map(Config) ->
+    case {
+        maps:get(base_url, Config, ?DEFAULT_BASE_URL),
+        maps:get(timeout, Config, ?DEFAULT_TIMEOUT)
+    } of
+        {BaseUrl, Timeout}
+                when is_binary(BaseUrl),
+                     byte_size(BaseUrl) > 0,
+                     is_integer(Timeout),
+                     Timeout > 0 ->
+            ok;
+        _ ->
+            {error, invalid_provider_config}
+    end;
+validate_provider_config(_Config) ->
+    {error, invalid_provider_config}.
 
 -spec prepare_payload(map()) ->
     {ok, map()} | {error, term()}.
