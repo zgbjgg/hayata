@@ -147,8 +147,40 @@ http_request_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+http_rate_limit_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        429,
+        <<"{\"error\":{\"message\":\"Rate limit exceeded\"}}">>
+    ),
+
+    Config = #{
+        api_key => <<"test-key">>,
+        base_url => list_to_binary(
+            "http://127.0.0.1:" ++ integer_to_list(Port) ++ "/v1"
+        ),
+        timeout => 5000
+    },
+
+    try
+        ?assertEqual(
+            {error, #{code => rate_limited}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec start_http_server(binary()) -> {inet:port_number(), pid()}.
 start_http_server(ResponseBody) ->
+    start_http_server(200, ResponseBody).
+
+-spec start_http_server(
+    non_neg_integer(),
+    binary()
+) -> {inet:port_number(), pid()}.
+start_http_server(Status, ResponseBody) ->
     {ok, ListenSocket} = gen_tcp:listen(0, [
         binary,
         {packet, raw},
@@ -167,7 +199,11 @@ start_http_server(ResponseBody) ->
             Parent ! {http_request, RequestLine, Headers, Body},
 
             Response = <<
-                "HTTP/1.1 200 OK\r\n",
+                "HTTP/1.1 ",
+                (integer_to_binary(Status))/binary,
+                " ",
+                (status_reason(Status))/binary,
+                "\r\n",
                 "Content-Type: application/json\r\n",
                 "Content-Length: ",
                 (integer_to_binary(byte_size(ResponseBody)))/binary,
@@ -274,3 +310,7 @@ valid_request() ->
             }
         ]
     }.
+
+-spec status_reason(non_neg_integer()) -> binary().
+status_reason(200) -> <<"OK">>;
+status_reason(429) -> <<"Too Many Requests">>.
