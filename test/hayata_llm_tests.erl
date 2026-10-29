@@ -284,6 +284,26 @@ generate_stream_rejects_invalid_consumer_result_test() ->
         )
     ).
 
+generate_stream_rejects_invalid_final_response_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => missing_message
+        }
+    },
+
+    Consumer = fun(_Event) ->
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
