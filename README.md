@@ -531,6 +531,20 @@ If a task may have affected an external service before its result was durably sa
 -   Validate behavior incrementally with EUnit and explicit VM-restart
     checks.
 
+## LLM
+
+Hayata's LLM integration is designed around a provider-neutral adapter contract. The shared contract defines the normalized request and response shapes, capability reporting, error codes, and optional streaming interface. Provider-specific API payloads and HTTP details stay inside each adapter.
+
+The `hayata_tool_loop` coordinates model calls and tool execution independently of the provider: it validates normalized assistant responses, executes registered tools in order, adds tool results to the conversation history, and continues until the model returns a final response or the iteration limit is reached. Providers should return normalized tool calls; they should not execute Hayata tool handlers themselves.
+
+### Available adapters
+
+- **OpenAI** — [OpenAI Responses API adapter documentation](docs/llm/openai.md). Supports normalized text generation, tool calling, and streaming.
+
+### Implementing another provider
+
+Use the [Adding an LLM provider guide](docs/llm/adding-a-provider.md) as the implementation checklist. It covers the adapter contract, normalized errors, tool-call serialization, streaming guarantees, and the test coverage expected before a provider is listed here.
+
 ## License
 
 Apache-2.0. See [LICENSE.md](LICENSE.md) for details.
