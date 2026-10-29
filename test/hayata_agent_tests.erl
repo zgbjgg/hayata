@@ -4642,6 +4642,114 @@ tool_loop_llm_exception_is_preserved_in_agent_state_test() ->
         )
     end).
 
+
+llm_stream_is_available_to_node_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"Hello">>
+                            }
+                        ]
+                    }
+                ],
+                case LLMStream(#{messages => Messages}) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, ask_llm, undefined};
+                1 ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        LLMEvents = [
+            Event
+            || Event <- Events,
+               lists:prefix(
+                   "llm_",
+                   atom_to_list(maps:get(type, Event))
+               )
+        ],
+
+        ?assertEqual(
+            [
+                llm_message_started,
+                llm_content_delta,
+                llm_content_delta,
+                llm_message_completed,
+                llm_generation_completed
+            ],
+            [maps:get(type, Event) || Event <- LLMEvents]
+        ),
+
+        ?assertEqual(
+            [<<"Hello ">>, <<"from Hayata.">>],
+            [
+                maps:get(text, maps:get(data, Event))
+                || Event <- LLMEvents,
+                   maps:get(type, Event) =:= llm_content_delta
+            ]
+        ),
+
+        ?assert(lists:all(
+            fun(Event) ->
+                Data = maps:get(data, Event),
+                maps:get(node_id, Data) =:= ask_llm
+            end,
+            LLMEvents
+        )),
+
+        GenerationIds = lists:usort([
+            maps:get(generation_id, maps:get(data, Event))
+            || Event <- LLMEvents
+        ]),
+        ?assertEqual(1, length(GenerationIds)),
+
+        Sequences = [
+            maps:get(sequence, Event)
+            || Event <- Events
+        ],
+        ?assertEqual(
+            lists:seq(1, length(Events)),
+            Sequences
+        ),
+
+        await_status(Agent, completed, 100),
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertMatch(#{llm_response := #{}}, Result)
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),

@@ -283,6 +283,41 @@ handle_call(
     State
 ) ->
     {reply, {error, stale_execution}, State};
+handle_call(
+    {hayata_llm_stream_event, InvocationId, NodeId, ExecutionId, Event},
+    _From,
+    #agent_state{
+        status = running,
+        invocation_id = InvocationId,
+        stream_enabled = true
+    } = State
+) ->
+    case active_node_execution(
+        NodeId,
+        ExecutionId,
+        State#agent_state.active_execution
+    ) of
+        true ->
+            case public_llm_event(Event, NodeId) of
+                {ok, Type, Data} ->
+                    UpdatedState = emit_stream_event(
+                        State,
+                        Type,
+                        Data
+                    ),
+                    {reply, ok, UpdatedState};
+                {error, Reason} ->
+                    {reply, {error, Reason}, State}
+            end;
+        false ->
+            {reply, {error, stale_execution}, State}
+    end;
+handle_call(
+    {hayata_llm_stream_event, _InvocationId, _NodeId, _ExecutionId, _Event},
+    _From,
+    State
+) ->
+    {reply, {error, stale_execution}, State};
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
@@ -1867,13 +1902,14 @@ emit_stream_event(State, _Type, _Data) ->
     #agent_state{}
 ) -> map().
 node_execution_context(NodeInput, NodeId, ExecutionId, State) ->
+    AgentPid = self(),
     Context = maybe_add_streamer(
         NodeInput,
         NodeId,
         ExecutionId,
         State
     ),
-    maybe_add_llm(Context, State#agent_state.llm_config).
+    maybe_add_llm(Context, NodeId, ExecutionId, AgentPid, State).
 
 -spec maybe_add_streamer(
     map(),
@@ -1913,12 +1949,55 @@ maybe_add_streamer(
 maybe_add_streamer(NodeInput, _NodeId, _ExecutionId, _State) ->
     NodeInput.
 
--spec maybe_add_llm(map(), undefined | map()) -> map().
-maybe_add_llm(Context, undefined) ->
+-spec maybe_add_llm(
+    map(),
+    atom(),
+    reference(),
+    pid(),
+    #agent_state{}
+) -> map().
+maybe_add_llm(Context, _NodeId, _ExecutionId, _AgentPid, #agent_state{llm_config = undefined}) ->
     Context;
-maybe_add_llm(Context, LLMConfig) when is_map(LLMConfig) ->
+maybe_add_llm(
+    Context,
+    NodeId,
+    ExecutionId,
+    AgentPid,
+    #agent_state{
+        llm_config = LLMConfig,
+        invocation_id = InvocationId,
+        stream_enabled = StreamEnabled
+    }
+) when is_map(LLMConfig) ->
     LLM = fun(Request) ->
         hayata_llm:generate(LLMConfig, Request)
+    end,
+    LLMStream = fun(Request) ->
+        case StreamEnabled of
+            true ->
+                hayata_llm:generate_stream(
+                    LLMConfig,
+                    Request,
+                    fun(Event) ->
+                        gen_server:call(
+                            AgentPid,
+                            {
+                                hayata_llm_stream_event,
+                                InvocationId,
+                                NodeId,
+                                ExecutionId,
+                                Event
+                            },
+                            5000
+                        )
+                    end
+                );
+            false ->
+                {error, #{
+                    code => unsupported_capability,
+                    capability => streaming
+                }}
+        end
     end,
     ToolLoop = fun(Request, Tools, MaxIterations) ->
         hayata_tool_loop:run(
@@ -1929,7 +2008,12 @@ maybe_add_llm(Context, LLMConfig) when is_map(LLMConfig) ->
         )
     end,
     ContextWithLLM = maps:put(hayata_llm, LLM, Context),
-    maps:put(hayata_tool_loop, ToolLoop, ContextWithLLM).
+    ContextWithStream = maps:put(
+        hayata_llm_stream,
+        LLMStream,
+        ContextWithLLM
+    ),
+    maps:put(hayata_tool_loop, ToolLoop, ContextWithStream).
 
 -spec active_node_execution(atom(), reference(), term()) -> boolean().
 active_node_execution(
@@ -1965,3 +2049,39 @@ invocation_initial_state(
     maps:merge(InitialState, Messages);
 invocation_initial_state(#agent_state{initial_state = InitialState}) ->
     InitialState.
+
+-spec public_llm_event(map(), atom()) ->
+    {ok, atom(), map()} | {error, invalid_stream_event}.
+public_llm_event(
+    #{type := Type, generation_id := GenerationId, data := Data},
+    NodeId
+) when is_map(Data) ->
+    case Type of
+        message_started ->
+            {ok, llm_message_started, llm_event_data(NodeId, GenerationId, Data)};
+        content_delta ->
+            {ok, llm_content_delta, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_started ->
+            {ok, llm_tool_call_started, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_delta ->
+            {ok, llm_tool_call_delta, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_completed ->
+            {ok, llm_tool_call_completed, llm_event_data(NodeId, GenerationId, Data)};
+        message_completed ->
+            {ok, llm_message_completed, llm_event_data(NodeId, GenerationId, Data)};
+        generation_completed ->
+            {ok, llm_generation_completed, llm_event_data(NodeId, GenerationId, Data)};
+        generation_failed ->
+            {ok, llm_generation_failed, llm_event_data(NodeId, GenerationId, Data)};
+        _ ->
+            {error, invalid_stream_event}
+    end;
+public_llm_event(_Event, _NodeId) ->
+    {error, invalid_stream_event}.
+
+-spec llm_event_data(atom(), term(), map()) -> map().
+llm_event_data(NodeId, GenerationId, Data) ->
+    Data#{
+        node_id => NodeId,
+        generation_id => GenerationId
+    }.
