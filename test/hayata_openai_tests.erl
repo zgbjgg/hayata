@@ -1076,6 +1076,166 @@ http_stream_rejects_failure_before_response_created_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_consumer_exception_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_consumer_error\"}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    Consumer = fun(_Event) ->
+        erlang:error(consumer_boom)
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{
+                code => cancelled,
+                reason => consumer_failed
+            }},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_consumer_invalid_return_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_consumer_invalid\"}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    Consumer = fun(_Event) ->
+        unexpected_result
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_rejects_invalid_created_json_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: not-json\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_rejects_invalid_delta_json_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_invalid_delta\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: not-json\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        ),
+
+        receive
+            {stream_event, Event} ->
+                ?assertEqual(
+                    message_started,
+                    maps:get(type, Event)
+                )
+        after 5000 ->
+            error(message_started_event_not_received)
+        end,
+
+        receive
+            {stream_event, _UnexpectedEvent} ->
+                error(invalid_delta_was_emitted)
+        after 100 ->
+            ok
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_timeout_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_stream_server_stalling(),
+    Config = (http_test_config(Port))#{timeout => 200},
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => timeout}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
@@ -1266,6 +1426,53 @@ start_http_stream_server(ResponseBody) ->
         ResponseBody,
         <<"text/event-stream">>
     ).
+
+-spec start_http_stream_server_stalling() ->
+    {inet:port_number(), pid()}.
+start_http_stream_server_stalling() ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [
+        binary,
+        {packet, raw},
+        {active, false},
+        {reuseaddr, true}
+    ]),
+
+    {ok, {_Address, Port}} = inet:sockname(ListenSocket),
+    Parent = self(),
+
+    ServerPid = spawn(fun() ->
+        try
+            {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+            {_RequestLine, _Headers, _Body} =
+                read_http_request(Socket),
+
+            ResponseHeaders = <<
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Content-Length: 100\r\n",
+                "Connection: close\r\n\r\n"
+            >>,
+
+            ok = gen_tcp:send(Socket, ResponseHeaders),
+
+            %% Keep the connection open without sending stream data.
+            timer:sleep(2000),
+
+            gen_tcp:close(Socket),
+            gen_tcp:close(ListenSocket)
+        catch
+            Class:Reason:Stacktrace ->
+                Parent ! {
+                    http_stream_stalling_server_error,
+                    Class,
+                    Reason,
+                    Stacktrace
+                },
+                erlang:raise(Class, Reason, Stacktrace)
+        end
+    end),
+
+    {Port, ServerPid}.
 
 -spec read_http_request(port()) -> {binary(), binary(), binary()}.
 read_http_request(Socket) ->
