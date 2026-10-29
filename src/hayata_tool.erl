@@ -270,7 +270,7 @@ validate_description(Tool) ->
             {error, invalid_description}
     end.
 
--spec validate_parameters(map()) -> {ok, map()} | {error, term()}.
+-spec validate_parameters(map()) -> ok | {error, term()}.
 validate_parameters(Tool) ->
     case maps:find(parameters, Tool) of
         error ->
