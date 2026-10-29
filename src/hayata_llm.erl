@@ -108,25 +108,12 @@ generate_stream(Config, Request, Consumer)
                 3
             ) of
                 true ->
-                    StreamConsumer = fun(Event) ->
-                        forward_stream_event(Event, Consumer)
-                    end,
-                    case safe_adapter_call(
+                    run_stream(
                         Adapter,
-                        generate_stream,
-                        [
-                            NormalizedRequest,
-                            ProviderConfig,
-                            StreamConsumer
-                        ]
-                    ) of
-                        {ok, Response} ->
-                            validate_response(Response);
-                        {error, Reason} ->
-                            normalize_error(Reason);
-                        _ ->
-                            {error, #{code => invalid_response}}
-                    end;
+                        ProviderConfig,
+                        NormalizedRequest,
+                        Consumer
+                    );
                 false ->
                     {error, #{code => unsupported_capability,
                         capability => streaming}}
@@ -298,11 +285,28 @@ validate_tool_calls_list([
 validate_tool_calls_list(_ToolCalls) ->
     {error, invalid_tool_call}.
 
--spec forward_stream_event(term(), hayata_llm_adapter:consumer()) ->
-    ok | {error, term()}.
-forward_stream_event(
+-spec forward_stream_event(
+    term(),
+    hayata_llm_adapter:consumer(),
+    ets:tid()
+) -> ok | {error, term()}.
+forward_stream_event(Event, Consumer, State) ->
+    case ets:lookup(State, cancellation) of
+        [{cancellation, Reason}] ->
+            {error, Reason};
+        [] ->
+            validate_stream_event(Event, Consumer, State)
+    end.
+
+-spec validate_stream_event(
+    term(),
+    hayata_llm_adapter:consumer(),
+    ets:tid()
+) -> ok | {error, term()}.
+validate_stream_event(
     #{type := Type, generation_id := _GenerationId, data := Data} = Event,
-    Consumer
+    Consumer,
+    State
 ) when is_atom(Type), is_map(Data) ->
     case lists:member(
         Type,
@@ -318,22 +322,40 @@ forward_stream_event(
         ]
     ) of
         true ->
-            try Consumer(Event) of
-                ok ->
-                    ok;
-                {error, _Reason} = Error ->
-                    Error;
-                _Other ->
-                    {error, invalid_consumer_result}
-            catch
-                _Class:_Reason ->
-                    {error, consumer_failed}
-            end;
+            call_stream_consumer(Event, Consumer, State);
         false ->
             {error, invalid_stream_event}
     end;
-forward_stream_event(_Event, _Consumer) ->
+validate_stream_event(_Event, _Consumer, _State) ->
     {error, invalid_stream_event}.
+
+-spec call_stream_consumer(
+    map(),
+    hayata_llm_adapter:consumer(),
+    ets:tid()
+) -> ok | {error, term()}.
+call_stream_consumer(Event, Consumer, State) ->
+    try Consumer(Event) of
+        ok ->
+            ok;
+        {error, Reason} = Error ->
+            record_stream_cancellation(State, Reason),
+            Error;
+        _Other ->
+            record_stream_cancellation(
+                State,
+                invalid_consumer_result
+            ),
+            {error, invalid_consumer_result}
+    catch
+        _Class:_Reason ->
+            record_stream_cancellation(State, consumer_failed),
+            {error, consumer_failed}
+    end.
+
+-spec record_stream_cancellation(ets:tid(), term()) -> true | false.
+record_stream_cancellation(State, Reason) ->
+    ets:insert_new(State, {cancellation, Reason}).
 
 -spec normalize_error(term()) ->
     {error, hayata_llm_adapter:normalized_error()}.
@@ -358,3 +380,43 @@ normalize_error(#{code := Code} = Error) ->
     end;
 normalize_error(_Reason) ->
     {error, #{code => provider_error}}.
+
+-spec run_stream(module(), map(), map(),
+    hayata_llm_adapter:consumer()) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+run_stream(Adapter, ProviderConfig, Request, Consumer) ->
+    State = ets:new(hayata_llm_stream_state, [set, public]),
+    try
+        StreamConsumer = fun(Event) ->
+            forward_stream_event(Event, Consumer, State)
+        end,
+
+        AdapterResult = safe_adapter_call(
+            Adapter,
+            generate_stream,
+            [Request, ProviderConfig, StreamConsumer]
+        ),
+
+        case ets:lookup(State, cancellation) of
+            [{cancellation, Reason}] ->
+                {error, #{
+                    code => cancelled,
+                    reason => {consumer_rejected_event, Reason}
+                }};
+            [] ->
+                normalize_stream_result(AdapterResult)
+        end
+    after
+        ets:delete(State)
+    end.
+
+-spec normalize_stream_result(term()) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+normalize_stream_result({ok, Response}) ->
+    validate_response(Response);
+normalize_stream_result({error, Reason}) ->
+    normalize_error(Reason);
+normalize_stream_result(_Result) ->
+    {error, #{code => invalid_response}}.
