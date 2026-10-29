@@ -504,6 +504,59 @@ run_rejects_tool_calls_with_stop_finish_reason_test() ->
         )
     ).
 
+run_recovers_from_non_serializable_tool_result_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            {ok, self()}
+        end
+    },
+
+    LLM = fun(Request) ->
+        Messages = maps:get(messages, Request),
+
+        case length(Messages) of
+            1 ->
+                {ok, tool_call_response()};
+            _ ->
+                Parent ! {recovery_messages, Messages},
+                {ok, text_response(<<"Tool result handled.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [Tool],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {recovery_messages, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+            [Content] = maps:get(content, ToolMessage),
+            EncodedResult = maps:get(text, Content),
+
+            ?assertEqual(
+                #{<<"error">> => <<"tool_result_not_serializable">>},
+                json:decode(EncodedResult)
+            )
+    after 1000 ->
+        error(missing_non_serializable_tool_result)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
