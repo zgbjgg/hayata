@@ -1050,6 +1050,32 @@ http_stream_rejects_malformed_response_created_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_rejects_failure_before_response_created_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.failed\n",
+        "data: {\"response\":{\"status\":\"failed\"}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
