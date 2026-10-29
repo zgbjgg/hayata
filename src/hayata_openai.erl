@@ -196,7 +196,7 @@ decode_response(Body) ->
 normalize_response(#{<<"status">> := <<"completed">>,
                      <<"output">> := Output} = Response) ->
     case extract_text(Output, []) of
-        {ok, Text} ->
+        {ok, Text} when byte_size(Text) > 0 ->
             {ok, #{
                 message => #{
                     role => assistant,
@@ -205,6 +205,8 @@ normalize_response(#{<<"status">> := <<"completed">>,
                 finish_reason => stop,
                 id => maps:get(<<"id">>, Response, undefined)
             }};
+        {ok, _EmptyText} ->
+            {error, #{code => invalid_response}};
         {error, _Reason} ->
             {error, #{code => invalid_response}}
     end;

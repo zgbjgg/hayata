@@ -253,6 +253,44 @@ http_authentication_error_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+http_completed_response_without_text_is_invalid_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"status\":\"completed\",\"output\":[]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_completed_response_with_unsupported_output_is_invalid_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"status\":\"completed\",\"output\":["
+          "{\"type\":\"function_call\",\"name\":\"test_tool\"}"
+          "]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{
