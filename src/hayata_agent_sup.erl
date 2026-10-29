@@ -104,7 +104,12 @@ validate_config(Config) when is_map(Config) ->
     case {maps:find(id, Config), maps:find(nodes, Config)} of
         {{ok, AgentId}, {ok, Nodes}}
                 when is_map(Nodes), map_size(Nodes) > 0 ->
-            validate_nodes(AgentId, maps:to_list(Nodes));
+            case validate_nodes(AgentId, maps:to_list(Nodes)) of
+                ok ->
+                    validate_llm_config(Config);
+                {error, Reason} ->
+                    {error, Reason}
+            end;
         {{ok, _AgentId}, {ok, Nodes}} when is_map(Nodes) ->
             {error, empty_node_catalog};
         _ ->
@@ -176,7 +181,9 @@ start_agent(SupPid, Config) ->
                 ),
                 max_steps => maps:get(max_steps, Config, 10),
                 execution_timeout => maps:get(execution_timeout, Config, 3000),
-                execution_starter => maps:get(execution_starter, Config, fun hayata_node:start_execution/6)
+                execution_starter => maps:get(execution_starter, Config, fun hayata_node:start_execution/6),
+                llm => maps:get(llm, Config, undefined),
+                conversation_memory => maps:get(conversation_memory, Config, false)
             },
             ChildSpec = #{
                 id => hayata_agent,
@@ -194,4 +201,19 @@ start_agent(SupPid, Config) ->
             end;
         {error, Reason} ->
             {error, Reason}
+    end.
+
+-doc(false).
+-spec validate_llm_config(map()) -> ok | {error, term()}.
+validate_llm_config(Config) ->
+    case maps:find(llm, Config) of
+        {ok, LLMConfig} ->
+            case hayata_llm:validate_config(LLMConfig) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    {error, {invalid_llm_config, Reason}}
+            end;
+        error ->
+            ok
     end.

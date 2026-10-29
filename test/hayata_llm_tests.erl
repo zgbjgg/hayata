@@ -1,0 +1,867 @@
+
+-module(hayata_llm_tests).
+
+-include_lib("eunit/include/eunit.hrl").
+
+validate_config_test() ->
+    ?assertEqual(ok, hayata_llm:validate_config(config())).
+
+validate_config_rejects_missing_adapter_test() ->
+    ?assertEqual(
+        {error, invalid_config},
+        hayata_llm:validate_config(#{
+            model => <<"mock-model">>
+        })
+    ).
+
+validate_config_rejects_empty_model_test() ->
+    ?assertEqual(
+        {error, invalid_config},
+        hayata_llm:validate_config(#{
+            adapter => hayata_llm_adapter_mock,
+            model => <<>>
+        })
+    ).
+
+capabilities_returns_adapter_capabilities_test() ->
+    {ok, Capabilities} = hayata_llm:capabilities(config()),
+
+    Features = maps:get(features, Capabilities),
+
+    ?assertEqual(true, maps:get(tool_calling, Features)),
+    ?assertEqual(true, maps:get(streaming, Features)).
+
+generate_uses_configured_model_test() ->
+    {ok, Response} = hayata_llm:generate(
+        config(),
+        valid_request()
+    ),
+
+    ?assertEqual(
+        assistant,
+        maps:get(role, maps:get(message, Response))
+    ).
+
+generate_rejects_model_mismatch_test() ->
+    Request = (valid_request())#{
+        model => <<"different-model">>
+    },
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_request,
+            reason => model_mismatch
+        }},
+        hayata_llm:generate(config(), Request)
+    ).
+
+generate_rejects_missing_messages_test() ->
+    ?assertEqual(
+        {error, #{
+            code => invalid_request,
+            reason => invalid_messages
+        }},
+        hayata_llm:generate(config(), #{})
+    ).
+
+generate_stream_forwards_events_test() ->
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {llm_event, Event},
+        ok
+    end,
+
+    {ok, Response} = hayata_llm:generate_stream(
+        config(),
+        valid_request(),
+        Consumer
+    ),
+
+    Events = collect_events(5, []),
+
+    ?assertEqual(
+        [
+            message_started,
+            content_delta,
+            content_delta,
+            message_completed,
+            generation_completed
+        ],
+        [maps:get(type, Event) || Event <- Events]
+    ),
+
+    ?assertEqual(
+        stop,
+        maps:get(finish_reason, Response)
+    ).
+
+generate_stream_propagates_consumer_error_test() ->
+    Consumer = fun(_Event) ->
+        {error, subscriber_unavailable}
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                subscriber_unavailable
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ).
+
+generate_stream_rejects_invalid_consumer_test() ->
+    ?assertEqual(
+        {error, #{code => invalid_request}},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            invalid_consumer
+        )
+    ).
+
+generate_preserves_tool_calls_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => tool_call}
+    },
+
+    {ok, Response} = hayata_llm:generate(Config, valid_request()),
+
+    ?assertEqual(tool_calls, maps:get(finish_reason, Response)),
+
+    Message = maps:get(message, Response),
+    [ToolCall] = maps:get(tool_calls, Message),
+
+    ?assertEqual(<<"call_123">>, maps:get(id, ToolCall)),
+    ?assertEqual(<<"get_weather">>, maps:get(name, ToolCall)),
+    ?assertEqual(
+        #{city => <<"Mexico City">>},
+        maps:get(arguments, ToolCall)
+    ).
+
+generate_rejects_invalid_tool_calls_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => invalid_tool_call}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_missing_message_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => missing_message}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_invalid_message_role_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => invalid_message_role}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_invalid_message_content_test() ->
+    Config = (config())#{
+        provider_config => #{response_mode => invalid_message_content}
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_invalid_finish_reason_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => invalid_finish_reason
+        }
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_tool_calls_finish_reason_without_calls_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => tool_calls_without_calls
+        }
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_tool_calls_with_stop_finish_reason_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => tool_calls_with_stop
+        }
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_stream_normalizes_adapter_exception_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => provider_failure
+        }
+    },
+
+    Consumer = fun(_Event) ->
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => provider_error,
+            reason => adapter_call_failed
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ).
+
+generate_stream_normalizes_consumer_exception_test() ->
+    Consumer = fun(_Event) ->
+        erlang:error(subscriber_crashed)
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                consumer_failed
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ).
+
+generate_stream_rejects_invalid_consumer_result_test() ->
+    Consumer = fun(_Event) ->
+        ignored
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                invalid_consumer_result
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ).
+
+generate_stream_rejects_invalid_final_response_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => missing_message
+        }
+    },
+
+    Consumer = fun(_Event) ->
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ).
+
+generate_stream_stops_after_consumer_rejection_test() ->
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Type = maps:get(type, Event),
+        Parent ! {stream_event, Type},
+        {error, subscriber_unavailable}
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                subscriber_unavailable
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, message_started} ->
+            ok
+    after 1000 ->
+        error(missing_first_stream_event)
+    end,
+
+    receive
+        {stream_event, UnexpectedEvent} ->
+            error({event_received_after_rejection, UnexpectedEvent})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_stops_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_non_cooperative_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, maps:get(type, Event)},
+        {error, subscriber_unavailable}
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                subscriber_unavailable
+            }
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, message_started} ->
+            ok
+    after 1000 ->
+        error(missing_first_stream_event)
+    end,
+
+    receive
+        {stream_event, UnexpectedEvent} ->
+            error({event_received_after_rejection, UnexpectedEvent})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_rejects_late_callback_test() ->
+    Config = (config())#{
+        adapter => hayata_llm_late_callback_adapter
+    },
+
+    Consumer = fun(_Event) ->
+        self() ! unexpected_late_event,
+        ok
+    end,
+
+    ?assertMatch(
+        {ok, _Response},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    LateConsumer = get(hayata_late_stream_consumer),
+    erase(hayata_late_stream_consumer),
+
+    Event = #{
+        type => content_delta,
+        generation_id => make_ref(),
+        data => #{text => <<"Too late">>}
+    },
+
+    ?assertEqual(
+        {error, stream_closed},
+        LateConsumer(Event)
+    ).
+
+generate_stream_waits_for_in_flight_callback_test() ->
+    Parent = self(),
+
+    spawn(fun() ->
+        AdapterOwner = self(),
+
+        Config = (config())#{
+            adapter => hayata_llm_concurrent_callback_adapter,
+            provider_config => #{
+                adapter_owner => AdapterOwner
+            }
+        },
+
+        Consumer = fun(_Event) ->
+            CallbackPid = self(),
+            Parent ! {consumer_started, CallbackPid},
+            AdapterOwner ! consumer_started,
+
+            receive
+                continue_callback ->
+                    ok
+            end
+        end,
+
+        Result = hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        ),
+
+        Parent ! {stream_result, Result}
+    end),
+
+    CallbackPid = receive
+        {consumer_started, Pid} ->
+            Pid
+    after 1000 ->
+        error(consumer_did_not_start)
+    end,
+
+    receive
+        {stream_result, Result} ->
+            error({returned_before_callback_finished, Result})
+    after 50 ->
+        ok
+    end,
+
+    CallbackPid ! continue_callback,
+
+    receive
+        {stream_result, {ok, _Response}} ->
+            ok;
+        {stream_result, OtherResult} ->
+            error({unexpected_stream_result, OtherResult})
+    after 1000 ->
+        error(stream_did_not_finish)
+    end.
+
+generate_stream_rejects_invalid_event_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_invalid_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_rejects_malformed_event_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_malformed_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_rejects_invalid_event_data_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_invalid_data_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_rejects_invalid_event_type_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_invalid_type_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_rejects_concurrent_callback_after_invalid_event_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_concurrent_invalid_event_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
+generate_stream_waits_for_in_flight_callback_after_invalid_event_test() ->
+    Parent = self(),
+
+    spawn(fun() ->
+        AdapterOwner = self(),
+
+        Config = (config())#{
+            adapter => hayata_llm_in_flight_invalid_event_adapter,
+            provider_config => #{
+                adapter_owner => AdapterOwner
+            }
+        },
+
+        Consumer = fun(_Event) ->
+            CallbackPid = self(),
+            Parent ! {consumer_started, CallbackPid},
+            AdapterOwner ! consumer_started,
+
+            receive
+                continue_callback ->
+                    ok
+            end
+        end,
+
+        Result = hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        ),
+
+        Parent ! {stream_result, Result}
+    end),
+
+    CallbackPid = receive
+        {consumer_started, Pid} ->
+            Pid
+    after 1000 ->
+        error(consumer_did_not_start)
+    end,
+
+    %% The stream must not finish while the callback is active,
+    %% even though the adapter has already sent an invalid event.
+    receive
+        {stream_result, ResultBeforeRelease} ->
+            error({returned_before_callback_finished, ResultBeforeRelease})
+    after 50 ->
+        ok
+    end,
+
+    CallbackPid ! continue_callback,
+
+    receive
+        {stream_result, {error, #{
+            code := invalid_response,
+            reason := invalid_stream_event
+        }}} ->
+            ok;
+        {stream_result, OtherResult} ->
+            error({unexpected_stream_result, OtherResult})
+    after 1000 ->
+        error(stream_did_not_finish)
+    end.
+
+generate_stream_rejects_inconsistent_generation_id_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_inconsistent_generation_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => inconsistent_generation_id
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, #{
+            type := content_delta,
+            generation_id := generation_one
+        }} ->
+            ok;
+        {stream_event, UnexpectedEvent} ->
+            error({unexpected_stream_event, UnexpectedEvent})
+    after 0 ->
+        error(first_stream_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, UnexpectedEvent2} ->
+            error({unexpected_stream_event, UnexpectedEvent2})
+    after 0 ->
+        ok
+    end.
+
+llm_stream_rejects_inconsistent_generation_id_test() ->
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    Result = hayata_llm:generate_stream(
+        #{
+            adapter => hayata_llm_inconsistent_generation_id_adapter,
+            model => <<"mock-model">>
+        },
+        #{
+            messages => [
+                #{
+                    role => user,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                }
+            ]
+        },
+        Consumer
+    ),
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => inconsistent_generation_id
+        }},
+        Result
+    ),
+
+    receive
+        {stream_event, _Event} ->
+            ok
+    after 1000 ->
+        error(first_stream_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, _UnexpectedEvent} ->
+            error(inconsistent_event_was_delivered)
+    after 100 ->
+        ok
+    end.
+
+llm_stream_rejects_event_after_generation_failed_test() ->
+    Parent = self(),
+    GenerationId = <<"event-after-failure-test">>,
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    Result = hayata_llm:generate_stream(
+        #{
+            adapter => hayata_llm_event_after_failure_adapter,
+            model => <<"mock-model">>
+        },
+        #{
+            messages => [
+                #{
+                    role => user,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                }
+            ]
+        },
+        Consumer
+    ),
+
+    ?assertMatch(
+        {error, _Reason},
+        Result
+    ),
+
+    receive
+        {stream_event, #{
+            type := generation_failed,
+            generation_id := GenerationId
+        }} ->
+            ok
+    after 1000 ->
+        error(generation_failed_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, _UnexpectedEvent} ->
+            error(event_after_generation_failure_was_delivered)
+    after 100 ->
+        ok
+    end.
+-spec config() -> hayata_llm:config().
+config() ->
+    #{
+        adapter => hayata_llm_adapter_mock,
+        model => <<"mock-model">>,
+        provider_config => #{}
+    }.
+
+-spec valid_request() -> map().
+valid_request() ->
+    #{
+        messages => [
+            #{
+                role => user,
+                content => [
+                    #{type => text, text => <<"Hello">>}
+                ]
+            }
+        ]
+    }.
+
+-spec collect_events(
+    non_neg_integer(),
+    [hayata_llm_adapter:stream_event()]
+) -> [hayata_llm_adapter:stream_event()].
+collect_events(0, Acc) ->
+    lists:reverse(Acc);
+collect_events(Count, Acc) ->
+    receive
+        {llm_event, Event} ->
+            collect_events(Count - 1, [Event | Acc])
+    after 1000 ->
+        error({missing_stream_events, Count})
+    end.

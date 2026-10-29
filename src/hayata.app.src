@@ -8,6 +8,8 @@
     {applications, [
         kernel,
         stdlib,
+        inets,
+        ssl,
         telemetry
     ]},
     {env, []},

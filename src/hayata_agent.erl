@@ -45,7 +45,9 @@
     parallel_results = undefined,
     execution_starter = fun hayata_node:start_execution/6,
     stream_enabled = false,
-    stream_sequence = 0
+    stream_sequence = 0,
+    llm_config = undefined,
+    conversation_memory = false
 }).
 
 -type config() :: #{
@@ -54,7 +56,8 @@
     node_sup_pid := pid(),
     decision_policy => function(),
     state => map(),
-    max_steps => pos_integer()
+    max_steps => pos_integer(),
+    conversation_memory => boolean()
 }.
 
 -doc("Starts an agent coordinator.").
@@ -141,7 +144,9 @@ init(Config) ->
                     execution_starter,
                     Config,
                     fun hayata_node:start_execution/6
-                )
+                ),
+                llm_config = maps:get(llm, Config, undefined),
+                conversation_memory = maps:get(conversation_memory, Config, false)
             },
             {ok, restore_invocation_state(State)};
         {error, Reason} ->
@@ -163,7 +168,7 @@ handle_call({run, Input, SubscriptionPid, StreamEnabled}, _From, State) ->
             InvocationStartTime = erlang:monotonic_time(),
             NewState = State#agent_state{
                 status = running,
-                state = State#agent_state.initial_state,
+                state = invocation_initial_state(State),
                 current_step = 0,
                 invocation_id = InvocationId,
                 subscription_pid = SubscriptionPid,
@@ -274,6 +279,41 @@ handle_call(
 handle_call(
     {hayata_node_partial_result, _InvocationId, _NodeId,
      _ExecutionId, _EdgeId, _PartialResult},
+    _From,
+    State
+) ->
+    {reply, {error, stale_execution}, State};
+handle_call(
+    {hayata_llm_stream_event, InvocationId, NodeId, ExecutionId, Event},
+    _From,
+    #agent_state{
+        status = running,
+        invocation_id = InvocationId,
+        stream_enabled = true
+    } = State
+) ->
+    case active_node_execution(
+        NodeId,
+        ExecutionId,
+        State#agent_state.active_execution
+    ) of
+        true ->
+            case public_llm_event(Event, NodeId) of
+                {ok, Type, Data} ->
+                    UpdatedState = emit_stream_event(
+                        State,
+                        Type,
+                        Data
+                    ),
+                    {reply, ok, UpdatedState};
+                {error, Reason} ->
+                    {reply, {error, Reason}, State}
+            end;
+        false ->
+            {reply, {error, stale_execution}, State}
+    end;
+handle_call(
+    {hayata_llm_stream_event, _InvocationId, _NodeId, _ExecutionId, _Event},
     _From,
     State
 ) ->
@@ -425,11 +465,11 @@ validate_config(Config) when is_map(Config) ->
                      MaxSteps > 0,
                      is_map(InitialState),
                      ExecutionTime > 0 ->
-            validate_node_catalog(Nodes);
+            validate_agent_config(Config, Nodes);
         {{ok, _Id}, {ok, Nodes}, {ok, NodeSupPid}, {ok, SupervisorPid},
          error, error, error, error}
                 when is_map(Nodes), is_pid(NodeSupPid), is_pid(SupervisorPid) ->
-            validate_node_catalog(Nodes);
+            validate_agent_config(Config, Nodes);
         _ ->
             {error, invalid_config}
     end;
@@ -449,6 +489,46 @@ validate_node_catalog([{NodeId, NodeFun} | Rest])
     validate_node_catalog(Rest);
 validate_node_catalog([{NodeId, _NodeFun} | _Rest]) ->
     {error, {invalid_node_definition, NodeId}}.
+
+validate_agent_config(Config, Nodes) ->
+    case validate_node_catalog(Nodes) of
+        ok ->
+            case validate_conversation_memory(Config) of
+                ok ->
+                    validate_llm_config(Config);
+                {error, _Reason} = Error ->
+                    Error
+            end;
+        {error, _Reason} = Error ->
+            Error
+    end.
+
+-spec validate_conversation_memory(map()) -> ok | {error, term()}.
+validate_conversation_memory(Config) ->
+    case maps:get(conversation_memory, Config, false) of
+        true ->
+            ok;
+        false ->
+            ok;
+        _ ->
+            {error, invalid_conversation_memory}
+    end.
+
+-spec validate_llm_config(map()) -> ok | {error, term()}.
+validate_llm_config(Config) ->
+    case maps:find(llm, Config) of
+        error ->
+            ok;
+        {ok, undefined} ->
+            ok;
+        {ok, LLMConfig} ->
+            case hayata_llm:validate_config(LLMConfig) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    {error, {invalid_llm_config, Reason}}
+            end
+    end.
 
 -spec prepare_invocation(#agent_state{}) -> ok | {error, term()}.
 prepare_invocation(#agent_state{status = ready}) ->
@@ -1821,7 +1901,23 @@ emit_stream_event(State, _Type, _Data) ->
     reference(),
     #agent_state{}
 ) -> map().
-node_execution_context(
+node_execution_context(NodeInput, NodeId, ExecutionId, State) ->
+    AgentPid = self(),
+    Context = maybe_add_streamer(
+        NodeInput,
+        NodeId,
+        ExecutionId,
+        State
+    ),
+    maybe_add_llm(Context, NodeId, ExecutionId, AgentPid, State).
+
+-spec maybe_add_streamer(
+    map(),
+    atom(),
+    reference(),
+    #agent_state{}
+) -> map().
+maybe_add_streamer(
     NodeInput,
     NodeId,
     ExecutionId,
@@ -1850,8 +1946,74 @@ node_execution_context(
             {error, invalid_partial_result}
     end,
     maps:put(hayata_streamer, Streamer, NodeInput);
-node_execution_context(NodeInput, _NodeId, _ExecutionId, _State) ->
+maybe_add_streamer(NodeInput, _NodeId, _ExecutionId, _State) ->
     NodeInput.
+
+-spec maybe_add_llm(
+    map(),
+    atom(),
+    reference(),
+    pid(),
+    #agent_state{}
+) -> map().
+maybe_add_llm(Context, _NodeId, _ExecutionId, _AgentPid, #agent_state{llm_config = undefined}) ->
+    Context;
+maybe_add_llm(
+    Context,
+    NodeId,
+    ExecutionId,
+    AgentPid,
+    #agent_state{
+        llm_config = LLMConfig,
+        invocation_id = InvocationId,
+        stream_enabled = StreamEnabled
+    }
+) when is_map(LLMConfig) ->
+    LLM = fun(Request) ->
+        hayata_llm:generate(LLMConfig, Request)
+    end,
+    LLMStream = fun(Request) ->
+        case StreamEnabled of
+            true ->
+                hayata_llm:generate_stream(
+                    LLMConfig,
+                    Request,
+                    fun(Event) ->
+                        gen_server:call(
+                            AgentPid,
+                            {
+                                hayata_llm_stream_event,
+                                InvocationId,
+                                NodeId,
+                                ExecutionId,
+                                Event
+                            },
+                            5000
+                        )
+                    end
+                );
+            false ->
+                {error, #{
+                    code => unsupported_capability,
+                    capability => streaming
+                }}
+        end
+    end,
+    ToolLoop = fun(Request, Tools, MaxIterations) ->
+        hayata_tool_loop:run(
+            LLM,
+            Request,
+            Tools,
+            MaxIterations
+        )
+    end,
+    ContextWithLLM = maps:put(hayata_llm, LLM, Context),
+    ContextWithStream = maps:put(
+        hayata_llm_stream,
+        LLMStream,
+        ContextWithLLM
+    ),
+    maps:put(hayata_tool_loop, ToolLoop, ContextWithStream).
 
 -spec active_node_execution(atom(), reference(), term()) -> boolean().
 active_node_execution(
@@ -1874,3 +2036,52 @@ active_node_execution(
     end;
 active_node_execution(_NodeId, _ExecutionId, _ActiveExecution) ->
     false.
+
+-spec invocation_initial_state(#agent_state{}) -> map().
+invocation_initial_state(
+    #agent_state{
+        conversation_memory = true,
+        initial_state = InitialState,
+        state = CurrentState
+    }
+) ->
+    Messages = maps:with([messages], CurrentState),
+    maps:merge(InitialState, Messages);
+invocation_initial_state(#agent_state{initial_state = InitialState}) ->
+    InitialState.
+
+-spec public_llm_event(map(), atom()) ->
+    {ok, atom(), map()} | {error, invalid_stream_event}.
+public_llm_event(
+    #{type := Type, generation_id := GenerationId, data := Data},
+    NodeId
+) when is_map(Data) ->
+    case Type of
+        message_started ->
+            {ok, llm_message_started, llm_event_data(NodeId, GenerationId, Data)};
+        content_delta ->
+            {ok, llm_content_delta, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_started ->
+            {ok, llm_tool_call_started, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_delta ->
+            {ok, llm_tool_call_delta, llm_event_data(NodeId, GenerationId, Data)};
+        tool_call_completed ->
+            {ok, llm_tool_call_completed, llm_event_data(NodeId, GenerationId, Data)};
+        message_completed ->
+            {ok, llm_message_completed, llm_event_data(NodeId, GenerationId, Data)};
+        generation_completed ->
+            {ok, llm_generation_completed, llm_event_data(NodeId, GenerationId, Data)};
+        generation_failed ->
+            {ok, llm_generation_failed, llm_event_data(NodeId, GenerationId, Data)};
+        _ ->
+            {error, invalid_stream_event}
+    end;
+public_llm_event(_Event, _NodeId) ->
+    {error, invalid_stream_event}.
+
+-spec llm_event_data(atom(), term(), map()) -> map().
+llm_event_data(NodeId, GenerationId, Data) ->
+    Data#{
+        node_id => NodeId,
+        generation_id => GenerationId
+    }.

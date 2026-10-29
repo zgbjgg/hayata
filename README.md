@@ -150,6 +150,44 @@ Erlang code path, compile it, and call:
 hello_hayata:run().
 ```
 
+## Conversational memory
+
+Agents can optionally preserve conversation history between successive
+invocations. Enable this behavior with `conversation_memory => true`
+in the agent configuration:
+
+```erlang
+Config = #{
+    id => support_agent,
+    state => #{messages => []},
+    nodes => Nodes,
+    decision_policy => DecisionPolicy,
+    conversation_memory => true
+}.
+```
+
+When conversational memory is enabled, Hayata carries the `messages`
+entry from the agent's current state into the next invocation. This lets
+a node build each LLM request from the previous conversation instead of
+starting with an empty message history every time.
+
+For example, if a node appends each new user message to the `messages`
+list, successive invocations can build a history like
+`[FirstMessage, SecondMessage]`. The application is responsible for
+appending messages in the format expected by its LLM provider and for
+deciding which messages belong in the conversation.
+
+The option defaults to `false`. With the default behavior, every
+invocation starts from the configured initial state, so message history
+from a previous invocation is not retained. When the option is enabled,
+only the `messages` entry is carried over; other state fields are reset
+to their configured initial values at the beginning of each invocation.
+
+This feature preserves history in the lifetime of the running agent. It
+is not a vector or semantic memory system, and it does not by itself
+provide a durable conversation store or guarantee that conversation
+history survives an agent or VM restart.
+
 ## Invocation API
 
 Hayata supports asynchronous agent invocations with optional result
@@ -530,6 +568,20 @@ If a task may have affected an external service before its result was durably sa
     potentially non-idempotent work.
 -   Validate behavior incrementally with EUnit and explicit VM-restart
     checks.
+
+## LLM
+
+Hayata's LLM integration is designed around a provider-neutral adapter contract. The shared contract defines the normalized request and response shapes, capability reporting, error codes, and optional streaming interface. Provider-specific API payloads and HTTP details stay inside each adapter.
+
+The `hayata_tool_loop` coordinates model calls and tool execution independently of the provider: it validates normalized assistant responses, executes registered tools in order, adds tool results to the conversation history, and continues until the model returns a final response or the iteration limit is reached. Providers should return normalized tool calls; they should not execute Hayata tool handlers themselves.
+
+### Available adapters
+
+- **OpenAI** — [OpenAI Responses API adapter documentation](docs/llm/openai.md). Supports normalized text generation, tool calling, and streaming.
+
+### Implementing another provider
+
+Use the [Adding an LLM provider guide](docs/llm/adding-a-provider.md) as the implementation checklist. It covers the adapter contract, normalized errors, tool-call serialization, streaming guarantees, and the test coverage expected before a provider is listed here.
 
 ## License
 
