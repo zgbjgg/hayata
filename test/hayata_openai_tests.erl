@@ -572,7 +572,7 @@ http_stream_failure_notifies_consumer_test() ->
         ),
 
         receive
-            {stream_event, Event} ->
+            {stream_event, _, Event} ->
                 ?assertEqual(
                     message_started,
                     maps:get(type, Event)
@@ -582,7 +582,7 @@ http_stream_failure_notifies_consumer_test() ->
         end,
 
         receive
-            {stream_event, Event2} ->
+            {stream_event, _, Event2} ->
                 ?assertEqual(
                     generation_failed,
                     maps:get(type, Event2)
@@ -706,7 +706,7 @@ http_stream_consumer_cancellation_test() ->
         ),
 
         receive
-            {stream_event, Event} ->
+            {stream_event, _, Event} ->
                 ?assertEqual(
                     message_started,
                     maps:get(type, Event)
@@ -716,7 +716,7 @@ http_stream_consumer_cancellation_test() ->
         end,
 
         receive
-            {stream_event, _UnexpectedEvent} ->
+            {stream_event, _, _UnexpectedEvent} ->
                 error(event_received_after_cancellation)
         after 100 ->
             ok
@@ -949,7 +949,7 @@ http_stream_rejects_malformed_text_delta_test() ->
         ),
 
         receive
-            {stream_event, Event} ->
+            {stream_event, _, Event} ->
                 ?assertEqual(
                     message_started,
                     maps:get(type, Event)
@@ -959,7 +959,7 @@ http_stream_rejects_malformed_text_delta_test() ->
         end,
 
         receive
-            {stream_event, _UnexpectedEvent} ->
+            {stream_event, _, _UnexpectedEvent} ->
                 error(malformed_delta_was_emitted)
         after 100 ->
             ok
@@ -1012,7 +1012,7 @@ http_stream_rejects_inconsistent_generation_id_test() ->
         ),
 
         receive
-            {stream_event, Event} ->
+            {stream_event, _, Event} ->
                 ?assertEqual(
                     message_started,
                     maps:get(type, Event)
@@ -1022,7 +1022,7 @@ http_stream_rejects_inconsistent_generation_id_test() ->
         end,
 
         receive
-            {stream_event, _UnexpectedEvent} ->
+            {stream_event, _, _UnexpectedEvent} ->
                 error(completion_event_received_for_inconsistent_id)
         after 100 ->
             ok
@@ -1205,7 +1205,7 @@ http_stream_rejects_invalid_delta_json_test() ->
         ),
 
         receive
-            {stream_event, Event} ->
+            {stream_event, _, Event} ->
                 ?assertEqual(
                     message_started,
                     maps:get(type, Event)
@@ -1215,7 +1215,7 @@ http_stream_rejects_invalid_delta_json_test() ->
         end,
 
         receive
-            {stream_event, _UnexpectedEvent} ->
+            {stream_event, _, _UnexpectedEvent} ->
                 error(invalid_delta_was_emitted)
         after 100 ->
             ok

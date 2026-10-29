@@ -320,7 +320,8 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
             0,
             undefined,
             undefined,
-            uninitialized
+            uninitialized,
+            false
         )
     end),
 
@@ -340,10 +341,15 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
         case Cancellation of
             undefined ->
                 normalize_stream_result(AdapterResult);
+            {adapter_error, event_after_terminal} ->
+                {error, #{
+                    code => invalid_response,
+                    reason => event_after_terminal
+                }};
             {adapter_error, inconsistent_generation_id} ->
                 {error, #{
-                     code => invalid_response,
-                     reason => inconsistent_generation_id
+                    code => invalid_response,
+                    reason => inconsistent_generation_id
                 }};
             {adapter_error, invalid_stream_event} ->
                 {error, #{
@@ -467,48 +473,69 @@ deliver_to_consumer(Event, Consumer) ->
     non_neg_integer(),
     term(),
     term(),
-    uninitialized | {set, term()}
+    uninitialized | {set, term()},
+    boolean()
 ) -> ok.
 stream_coordinator_loop(
     Status,
     Active,
     Cancellation,
     CloseRequest,
-    GenerationId
+    GenerationId,
+    Terminal
 ) ->
     receive
         {begin_event, From, Ref, _Event}
-            when Status =:= closing ->
-            From ! {Ref, {error, stream_closed}},
+            when Terminal =:= true ->
+            NextCancellation = {adapter_error, event_after_terminal},
+            From ! {Ref, {error, NextCancellation}},
             stream_coordinator_loop(
                 Status,
                 Active,
-                Cancellation,
+                NextCancellation,
                 CloseRequest,
-                GenerationId
+                GenerationId,
+                Terminal
             );
 
-        {begin_event, From, Ref, _Event}
-            when Cancellation =/= undefined ->
-            From ! {Ref, {error, Cancellation}},
+        {begin_event, From, Ref, Event}
+            when Status =:= closing ->
+            From ! {Ref, {error, stream_closed}},
+            NextTerminal = Terminal orelse terminal_stream_event(Event),
             stream_coordinator_loop(
                 Status,
                 Active,
                 Cancellation,
                 CloseRequest,
-                GenerationId
+                GenerationId,
+                NextTerminal
+            );
+
+        {begin_event, From, Ref, Event}
+            when Cancellation =/= undefined ->
+            From ! {Ref, {error, Cancellation}},
+            NextTerminal = Terminal orelse terminal_stream_event(Event),
+            stream_coordinator_loop(
+                Status,
+                Active,
+                Cancellation,
+                CloseRequest,
+                GenerationId,
+                NextTerminal
             );
 
         {begin_event, From, Ref, Event} ->
             case stream_generation_id(Event, GenerationId) of
                 {ok, NextGenerationId} ->
                     From ! {Ref, accepted},
+                    NextTerminal = Terminal orelse terminal_stream_event(Event),
                     stream_coordinator_loop(
                         Status,
                         Active + 1,
                         Cancellation,
                         CloseRequest,
-                        NextGenerationId
+                        NextGenerationId,
+                        NextTerminal
                     );
                 {error, Reason} ->
                     NextCancellation = {
@@ -519,12 +546,14 @@ stream_coordinator_loop(
                         Ref,
                         {error, NextCancellation}
                     },
+                    NextTerminal = Terminal orelse terminal_stream_event(Event),
                     stream_coordinator_loop(
                         Status,
                         Active,
                         NextCancellation,
                         CloseRequest,
-                        GenerationId
+                        GenerationId,
+                        NextTerminal
                     )
             end;
 
@@ -548,12 +577,14 @@ stream_coordinator_loop(
                     },
                     ok;
                 _ ->
+                    NextTerminal = Terminal orelse terminal_stream_event(EventCancellation),
                     stream_coordinator_loop(
                         Status,
                         NextActive,
                         NextCancellation,
                         CloseRequest,
-                        GenerationId
+                        GenerationId,
+                        NextTerminal
                     )
             end;
 
@@ -567,7 +598,8 @@ stream_coordinator_loop(
                 Active,
                 Cancellation,
                 {From, Ref},
-                GenerationId
+                GenerationId,
+                Terminal
             );
 
         stop ->
@@ -610,3 +642,11 @@ stream_generation_id(Event, {set, ExistingGenerationId}) ->
         _ ->
             {ok, {set, ExistingGenerationId}}
     end.
+
+-spec terminal_stream_event(term()) -> boolean().
+terminal_stream_event(#{type := generation_completed}) ->
+    true;
+terminal_stream_event(#{type := generation_failed}) ->
+    true;
+terminal_stream_event(_Event) ->
+    false.
