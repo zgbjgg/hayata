@@ -4750,6 +4750,75 @@ llm_stream_is_available_to_node_test() ->
         ?assertMatch(#{llm_response := #{}}, Result)
     end).
 
+llm_stream_rejects_stale_execution_event_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_Context) ->
+                #{answer => 42}
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, work, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        NodeStartedEvent = hd([
+            Event
+            || Event <- Events,
+               maps:get(type, Event) =:= node_started
+        ]),
+
+        ExecutionId = maps:get(
+            execution_id,
+            maps:get(data, NodeStartedEvent)
+        ),
+
+        GenerationId = make_ref(),
+
+        Result = gen_server:call(
+            Agent,
+            {
+                hayata_llm_stream_event,
+                InvocationId,
+                work,
+                ExecutionId,
+                #{
+                    type => content_delta,
+                    generation_id => GenerationId,
+                    data => #{text => <<"stale">>}
+                }
+            }
+        ),
+
+        ?assertEqual({error, stale_execution}, Result),
+
+        receive
+            {hayata_agent_event, InvocationId, Event} ->
+                error({unexpected_event_after_stale_llm_event, Event})
+        after 100 ->
+            ok
+        end
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),
