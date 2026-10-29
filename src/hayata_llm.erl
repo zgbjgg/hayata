@@ -315,7 +315,13 @@ normalize_error(_Reason) ->
     {error, hayata_llm_adapter:normalized_error()}.
 run_stream(Adapter, ProviderConfig, Request, Consumer) ->
     Coordinator = spawn(fun() ->
-        stream_coordinator_loop(open, 0, undefined, undefined)
+        stream_coordinator_loop(
+            open,
+            0,
+            undefined,
+            undefined,
+            uninitialized
+        )
     end),
 
     try
@@ -334,6 +340,11 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
         case Cancellation of
             undefined ->
                 normalize_stream_result(AdapterResult);
+            {adapter_error, inconsistent_generation_id} ->
+                {error, #{
+                     code => invalid_response,
+                     reason => inconsistent_generation_id
+                }};
             {adapter_error, invalid_stream_event} ->
                 {error, #{
                     code => invalid_response,
@@ -367,7 +378,7 @@ normalize_stream_result(_Result) ->
 coordinated_stream_event(Coordinator, Event, Consumer) ->
     Ref = make_ref(),
     Monitor = erlang:monitor(process, Coordinator),
-    Coordinator ! {begin_event, self(), Ref},
+    Coordinator ! {begin_event, self(), Ref, Event},
 
     Result = receive
         {Ref, accepted} ->
@@ -455,36 +466,67 @@ deliver_to_consumer(Event, Consumer) ->
     open | closing,
     non_neg_integer(),
     term(),
-    term()
+    term(),
+    uninitialized | {set, term()}
 ) -> ok.
-stream_coordinator_loop(Status, Active, Cancellation, CloseRequest) ->
+stream_coordinator_loop(
+    Status,
+    Active,
+    Cancellation,
+    CloseRequest,
+    GenerationId
+) ->
     receive
-        {begin_event, From, Ref} when Status =:= closing ->
+        {begin_event, From, Ref, _Event}
+            when Status =:= closing ->
             From ! {Ref, {error, stream_closed}},
             stream_coordinator_loop(
                 Status,
                 Active,
                 Cancellation,
-                CloseRequest
+                CloseRequest,
+                GenerationId
             );
 
-        {begin_event, From, Ref} when Cancellation =/= undefined ->
+        {begin_event, From, Ref, _Event}
+            when Cancellation =/= undefined ->
             From ! {Ref, {error, Cancellation}},
             stream_coordinator_loop(
                 Status,
                 Active,
                 Cancellation,
-                CloseRequest
-           );
-
-        {begin_event, From, Ref} ->
-            From ! {Ref, accepted},
-            stream_coordinator_loop(
-                Status,
-                Active + 1,
-               Cancellation,
-               CloseRequest
+                CloseRequest,
+                GenerationId
             );
+
+        {begin_event, From, Ref, Event} ->
+            case stream_generation_id(Event, GenerationId) of
+                {ok, NextGenerationId} ->
+                    From ! {Ref, accepted},
+                    stream_coordinator_loop(
+                        Status,
+                        Active + 1,
+                        Cancellation,
+                        CloseRequest,
+                        NextGenerationId
+                    );
+                {error, Reason} ->
+                    NextCancellation = {
+                        adapter_error,
+                        Reason
+                    },
+                    From ! {
+                        Ref,
+                        {error, NextCancellation}
+                    },
+                    stream_coordinator_loop(
+                        Status,
+                        Active,
+                        NextCancellation,
+                        CloseRequest,
+                        GenerationId
+                    )
+            end;
 
         {finish_event, From, Ref, Result, EventCancellation} ->
             NextCancellation = case Cancellation of
@@ -500,14 +542,18 @@ stream_coordinator_loop(Status, Active, Cancellation, CloseRequest) ->
 
             case {Status, NextActive, CloseRequest} of
                 {closing, 0, {CloseFrom, CloseRef}} ->
-                    CloseFrom ! {CloseRef, NextCancellation},
+                    CloseFrom ! {
+                        CloseRef,
+                        NextCancellation
+                    },
                     ok;
                 _ ->
                     stream_coordinator_loop(
                         Status,
                         NextActive,
                         NextCancellation,
-                        CloseRequest
+                        CloseRequest,
+                        GenerationId
                     )
             end;
 
@@ -520,7 +566,8 @@ stream_coordinator_loop(Status, Active, Cancellation, CloseRequest) ->
                 closing,
                 Active,
                 Cancellation,
-                {From, Ref}
+                {From, Ref},
+                GenerationId
             );
 
         stop ->
@@ -541,3 +588,25 @@ close_stream_coordinator(Coordinator) ->
 stop_stream_coordinator(Coordinator) ->
     Coordinator ! stop,
     ok.
+
+-spec stream_generation_id(
+    term(),
+    uninitialized | {set, term()}
+) -> {ok, uninitialized | {set, term()}} |
+    {error, inconsistent_generation_id}.
+stream_generation_id(Event, uninitialized) ->
+    case Event of
+        #{generation_id := GenerationId} ->
+            {ok, {set, GenerationId}};
+        _ ->
+            {ok, uninitialized}
+    end;
+stream_generation_id(Event, {set, ExistingGenerationId}) ->
+    case Event of
+        #{generation_id := ExistingGenerationId} ->
+            {ok, {set, ExistingGenerationId}};
+        #{generation_id := _OtherGenerationId} ->
+            {error, inconsistent_generation_id};
+        _ ->
+            {ok, {set, ExistingGenerationId}}
+    end.

@@ -692,6 +692,49 @@ generate_stream_waits_for_in_flight_callback_after_invalid_event_test() ->
         error(stream_did_not_finish)
     end.
 
+generate_stream_rejects_inconsistent_generation_id_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_inconsistent_generation_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => inconsistent_generation_id
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, #{
+            type := content_delta,
+            generation_id := generation_one
+        }} ->
+            ok;
+        {stream_event, UnexpectedEvent} ->
+            error({unexpected_stream_event, UnexpectedEvent})
+    after 0 ->
+        error(first_stream_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, UnexpectedEvent2} ->
+            error({unexpected_stream_event, UnexpectedEvent2})
+    after 0 ->
+        ok
+    end.
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{

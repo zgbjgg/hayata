@@ -17,16 +17,17 @@ generate(Request, Config) ->
 
 generate_stream(Request, Config, Consumer) ->
     _AdapterOwner = maps:get(adapter_owner, Config),
+    GenerationId = make_ref(),
 
     ValidEvent = #{
         type => content_delta,
-        generation_id => make_ref(),
+        generation_id => GenerationId,
         data => #{text => <<"In flight">>}
     },
 
     InvalidEvent = #{
         type => unknown_event,
-        generation_id => make_ref(),
+        generation_id => GenerationId,
         data => #{}
     },
 
