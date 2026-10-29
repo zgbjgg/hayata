@@ -176,6 +176,102 @@ execute_normalizes_handler_exception_test() ->
         )
     ).
 
+
+validate_registry_rejects_invalid_parameter_type_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => unsupported_type}
+            }
+        }
+    },
+
+    ?assertEqual(
+        {error, {invalid_tool, invalid_property_schema}},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_rejects_invalid_parameter_root_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => string,
+            properties => #{}
+        }
+    },
+
+    ?assertEqual(
+        {error, {invalid_tool, invalid_parameters_schema}},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_rejects_invalid_properties_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => []
+        }
+    },
+
+    ?assertEqual(
+        {error, {invalid_tool, invalid_parameters_schema}},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_rejects_unknown_required_property_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"country">>]
+        }
+    },
+
+    ?assertEqual(
+        {error, {
+            invalid_tool,
+            {unknown_required_property, <<"country">>}
+        }},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_rejects_invalid_required_list_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => <<"city">>
+        }
+    },
+
+    ?assertEqual(
+        {error, {invalid_tool, invalid_required_properties}},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_rejects_duplicate_required_property_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>, city]
+        }
+    },
+
+    ?assertEqual(
+        {error, {
+            invalid_tool,
+            {duplicate_required_property, <<"city">>}
+        }},
+        hayata_tool:validate_registry([Tool])
+    ).
+
 -spec weather_tool() -> map().
 weather_tool() ->
     #{

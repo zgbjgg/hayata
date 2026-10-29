@@ -270,16 +270,91 @@ validate_description(Tool) ->
             {error, invalid_description}
     end.
 
--spec validate_parameters(map()) -> ok | {error, term()}.
+-spec validate_parameters(map()) -> {ok, map()} | {error, term()}.
 validate_parameters(Tool) ->
     case maps:find(parameters, Tool) of
         error ->
             {error, missing_parameters};
         {ok, Parameters} when is_map(Parameters) ->
-            validate_handler(Tool);
+            case validate_parameter_schema(Parameters) of
+                ok ->
+                    validate_handler(Tool);
+                {error, Reason} ->
+                    {error, Reason}
+            end;
         {ok, _Parameters} ->
             {error, invalid_parameters}
     end.
+
+-spec validate_parameter_schema(map()) -> ok | {error, term()}.
+validate_parameter_schema(#{type := object, properties := Properties} = Schema)
+        when is_map(Properties) ->
+    case validate_properties(maps:to_list(Properties)) of
+        ok ->
+            validate_required_schema(
+                maps:get(required, Schema, []),
+                Properties
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+validate_parameter_schema(_Schema) ->
+    {error, invalid_parameters_schema}.
+
+-spec validate_properties([{term(), term()}]) -> ok | {error, term()}.
+validate_properties([{Name, Schema} | Rest]) when is_map(Schema) ->
+    case {normalize_key(Name), maps:get(type, Schema, undefined)} of
+        {{ok, _NormalizedName}, Type}
+                when Type =:= string;
+                     Type =:= number;
+                     Type =:= integer;
+                     Type =:= boolean;
+                     Type =:= object ->
+            validate_properties(Rest);
+        {{ok, _NormalizedName}, _Type} ->
+            {error, invalid_property_schema};
+        {error, _Type} ->
+            {error, invalid_property_name}
+    end;
+validate_properties([{_Name, _Schema} | _Rest]) ->
+    {error, invalid_property_schema};
+validate_properties([]) ->
+    ok.
+
+-spec validate_required_schema(term(), map()) -> ok | {error, term()}.
+validate_required_schema(Required, Properties) when is_list(Required) ->
+    validate_required_properties(Required, Properties, []);
+validate_required_schema(_Required, _Properties) ->
+    {error, invalid_required_properties}.
+
+-spec validate_required_properties(
+    [term()],
+    map(),
+    [binary()]
+) -> ok | {error, term()}.
+validate_required_properties([Name | Rest], Properties, Seen) ->
+    case normalize_key(Name) of
+        {ok, NormalizedName} ->
+            case lists:member(NormalizedName, Seen) of
+                true ->
+                    {error, {duplicate_required_property, NormalizedName}};
+                false ->
+                    case find_key(NormalizedName, Properties) of
+                        {ok, _PropertySchema} ->
+                            validate_required_properties(
+                                Rest,
+                                Properties,
+                                [NormalizedName | Seen]
+                            );
+                        error ->
+                            {error, {unknown_required_property, NormalizedName}}
+                    end
+            end;
+        error ->
+            {error, invalid_required_property}
+    end;
+validate_required_properties([], _Properties, _Seen) ->
+    ok.
 
 -spec validate_handler(map()) -> ok | {error, term()}.
 validate_handler(Tool) ->
