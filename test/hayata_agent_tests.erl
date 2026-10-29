@@ -4378,6 +4378,63 @@ tool_loop_executes_tool_and_returns_final_response_test() ->
         end
     end).
 
+tool_loop_error_is_preserved_in_agent_state_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm_with_tool_loop => fun(Context) ->
+                ToolLoop = maps:get(hayata_tool_loop, Context),
+                Request = #{
+                    messages => [
+                        #{
+                            role => user,
+                            content => [
+                                #{
+                                    type => text,
+                                    text => <<"Hello">>
+                                }
+                            ]
+                        }
+                    ]
+                },
+
+                case ToolLoop(Request, [#{}], 3) of
+                    {ok, Result} ->
+                        #{tool_loop_result => Result};
+                    {error, Reason} ->
+                        #{tool_loop_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>,
+            provider_config => #{response_mode => text}
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, ask_llm_with_tool_loop, undefined};
+                1 ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{tool_loop_error := {invalid_tools, _}},
+            Result
+        )
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),
