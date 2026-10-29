@@ -667,6 +667,137 @@ run_preserves_assistant_content_with_tool_calls_test() ->
         error(messages_after_tool_call_not_received)
     end.
 
+run_rejects_mixed_valid_and_invalid_tool_calls_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{city => #{type => string}},
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! tool_was_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    Response = #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_valid">>,
+                    name => <<"get_weather">>,
+                    arguments => #{city => <<"Puebla">>}
+                },
+                #{
+                    id => <<>>,
+                    name => <<"get_weather">>,
+                    arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    },
+
+    LLM = fun(_Request) -> {ok, Response} end,
+
+    ?assertEqual(
+        {error, {llm_failed, invalid_llm_response}},
+        hayata_tool_loop:run(LLM, request(), [Tool], 5)
+    ),
+
+    receive
+        tool_was_executed ->
+            error(invalid_tool_call_was_partially_executed)
+    after 100 ->
+        ok
+    end.
+
+run_rejects_unexpected_llm_response_shapes_test() ->
+    InvalidResponses = [
+        unexpected_response,
+        {ok, not_a_map},
+        {ok, #{}},
+        {ok, #{
+            message => #{
+                role => user,
+                content => []
+            },
+            finish_reason => stop
+        }}
+    ],
+
+    lists:foreach(
+        fun(LLMResult) ->
+            LLM = fun(_Request) -> LLMResult end,
+
+            ?assertEqual(
+                {error, {llm_failed, invalid_llm_response}},
+                hayata_tool_loop:run(LLM, request(), [], 3)
+            )
+        end,
+        InvalidResponses
+    ).
+
+run_recovers_from_explicit_tool_error_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{city => #{type => string}},
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            {error, weather_service_unavailable}
+        end
+    },
+
+    LLM = fun(Request) ->
+        case length(maps:get(messages, Request)) of
+            1 ->
+                {ok, tool_call_response()};
+            _ ->
+                Parent ! {messages_after_tool_error,
+                    maps:get(messages, Request)},
+                {ok, text_response(<<"Weather is temporarily unavailable.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [Tool],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+    ?assertEqual(
+        <<"Weather is temporarily unavailable.">>,
+        response_text(maps:get(response, Result))
+    ),
+
+    receive
+        {messages_after_tool_error, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+            [Content] = maps:get(content, ToolMessage),
+            Error = json:decode(maps:get(text, Content)),
+
+            ?assertEqual(
+                #{<<"error">> => <<"tool_execution_failed">>},
+                Error
+            )
+    after 1000 ->
+        error(missing_tool_error_result)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
