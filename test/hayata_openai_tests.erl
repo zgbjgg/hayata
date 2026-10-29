@@ -794,6 +794,32 @@ http_stream_fragmented_event_test() ->
         exit(ServerPid, kill)
     end.
 
+
+http_stream_rejects_invalid_content_type_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_stream_server_with_content_type(
+        <<"{}">>,
+        <<"application/json">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
@@ -869,9 +895,9 @@ start_http_server(Status, ResponseBody) ->
 
     {Port, ServerPid}.
 
--spec start_http_stream_server(binary()) ->
+-spec start_http_stream_server_with_content_type(binary(), binary()) ->
     {inet:port_number(), pid()}.
-start_http_stream_server(ResponseBody) ->
+start_http_stream_server_with_content_type(ResponseBody, ContentType) ->
     {ok, ListenSocket} = gen_tcp:listen(0, [
         binary,
         {packet, raw},
@@ -890,7 +916,9 @@ start_http_stream_server(ResponseBody) ->
 
             Response = <<
                 "HTTP/1.1 200 OK\r\n",
-                "Content-Type: text/event-stream\r\n",
+                "Content-Type: ",
+                ContentType/binary,
+                "\r\n",
                 "Content-Length: ",
                 (integer_to_binary(byte_size(ResponseBody)))/binary,
                 "\r\n",
@@ -974,6 +1002,14 @@ start_http_stream_server_chunks(Chunks) ->
     end),
 
     {Port, ServerPid}.
+
+-spec start_http_stream_server(binary()) ->
+    {inet:port_number(), pid()}.
+start_http_stream_server(ResponseBody) ->
+    start_http_stream_server_with_content_type(
+        ResponseBody,
+        <<"text/event-stream">>
+    ).
 
 -spec read_http_request(port()) -> {binary(), binary(), binary()}.
 read_http_request(Socket) ->
