@@ -723,6 +723,77 @@ http_stream_consumer_cancellation_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_fragmented_event_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    Chunk1 = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":"
+    >>,
+
+    Chunk2 = <<
+        "\"resp_fragmented\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Hello\","
+        "\"output_index\":0,\"content_index\":0}\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{"
+        "\"id\":\"resp_fragmented\","
+        "\"status\":\"completed\","
+        "\"output\":[{"
+        "\"type\":\"message\","
+        "\"content\":[{"
+        "\"type\":\"output_text\","
+        "\"text\":\"Hello\""
+        "}]}]}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server_chunks([
+        Chunk1,
+        Chunk2
+    ]),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {ok, #{
+                message => #{
+                    role => assistant,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                },
+                finish_reason => stop,
+                id => <<"resp_fragmented">>
+            }},
+            Result
+        ),
+
+        ?assertEqual(
+            [
+                message_started,
+                content_delta,
+                message_completed,
+                generation_completed
+            ],
+            receive_stream_event_types(4, [])
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
@@ -828,6 +899,66 @@ start_http_stream_server(ResponseBody) ->
             >>,
 
             ok = gen_tcp:send(Socket, Response),
+            gen_tcp:close(Socket),
+            gen_tcp:close(ListenSocket)
+        catch
+            Class:Reason:Stacktrace ->
+                Parent ! {
+                    http_server_error,
+                    Class,
+                    Reason,
+                    Stacktrace
+                },
+                erlang:raise(Class, Reason, Stacktrace)
+        end
+    end),
+
+    {Port, ServerPid}.
+
+-spec start_http_stream_server_chunks([binary()]) ->
+    {inet:port_number(), pid()}.
+start_http_stream_server_chunks(Chunks) ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [
+        binary,
+        {packet, raw},
+        {active, false},
+        {reuseaddr, true}
+    ]),
+
+    {ok, {_Address, Port}} = inet:sockname(ListenSocket),
+    Parent = self(),
+    ResponseBody = iolist_to_binary(Chunks),
+
+    ServerPid = spawn(fun() ->
+        try
+            {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+            {RequestLine, Headers, Body} = read_http_request(Socket),
+            Parent ! {
+                http_stream_request,
+                RequestLine,
+                Headers,
+                Body
+            },
+
+            ResponseHeaders = <<
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Content-Length: ",
+                (integer_to_binary(byte_size(ResponseBody)))/binary,
+                "\r\n",
+                "Connection: close\r\n\r\n"
+            >>,
+
+            ok = gen_tcp:send(Socket, ResponseHeaders),
+
+            lists:foreach(
+                fun(Chunk) ->
+                    ok = gen_tcp:send(Socket, Chunk),
+                    timer:sleep(50)
+                end,
+                Chunks
+            ),
+
             gen_tcp:close(Socket),
             gen_tcp:close(ListenSocket)
         catch
