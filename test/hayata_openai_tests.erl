@@ -84,7 +84,7 @@ http_request_is_normalized_test() ->
           "{\"type\":\"output_text\",\"text\":\"Hello from OpenAI\"}"
           "]}]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
 
     Config = #{
         api_key => <<"test-key">>,
@@ -115,7 +115,7 @@ http_request_is_normalized_test() ->
         ),
 
         receive
-            {http_request, RequestLine, Headers, Body} ->
+            {http_request, TestRef, RequestLine, Headers, Body} ->
                 ?assertMatch(
                     <<"POST /v1/responses", _/binary>>,
                     RequestLine
@@ -156,7 +156,7 @@ http_request_is_normalized_test() ->
 http_rate_limit_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         429,
         <<"{\"error\":{\"message\":\"Rate limit exceeded\"}}">>
     ),
@@ -185,7 +185,7 @@ http_incomplete_response_is_normalized_test() ->
         <<"{\"status\":\"incomplete\","
           "\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -203,7 +203,7 @@ http_incomplete_response_is_normalized_test() ->
 http_invalid_json_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(<<"not-json">>),
+    {Port, ServerPid, _TestRef} = start_http_server(<<"not-json">>),
     Config = http_test_config(Port),
 
     try
@@ -242,7 +242,7 @@ invalid_timeout_test() ->
 http_authentication_error_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         401,
         <<"{\"error\":{\"message\":\"Invalid API key\"}}">>
     ),
@@ -264,7 +264,7 @@ http_completed_response_without_text_is_invalid_test() ->
     ResponseBody =
         <<"{\"status\":\"completed\",\"output\":[]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -284,7 +284,7 @@ http_completed_response_with_unsupported_output_is_invalid_test() ->
           "{\"type\":\"function_call\",\"name\":\"test_tool\"}"
           "]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -299,7 +299,7 @@ http_completed_response_with_unsupported_output_is_invalid_test() ->
 http_invalid_request_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         400,
         <<"{\"error\":{\"message\":\"Invalid request\"}}">>
     ),
@@ -318,7 +318,7 @@ http_invalid_request_is_normalized_test() ->
 http_provider_error_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         500,
         <<"{\"error\":{\"message\":\"Internal server error\"}}">>
     ),
@@ -337,7 +337,7 @@ http_provider_error_is_normalized_test() ->
 http_forbidden_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         403,
         <<"{\"error\":{\"message\":\"Forbidden\"}}">>
     ),
@@ -356,7 +356,7 @@ http_forbidden_is_normalized_test() ->
 http_gateway_timeout_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         504,
         <<"{\"error\":{\"message\":\"Gateway timeout\"}}">>
     ),
@@ -825,7 +825,7 @@ http_stream_rejects_invalid_content_type_test() ->
 http_stream_rate_limit_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         429,
         <<"{\"error\":{\"message\":\"Rate limit exceeded\"}}">>
     ),
@@ -850,7 +850,7 @@ http_stream_rate_limit_is_normalized_test() ->
 http_stream_authentication_error_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
-    {Port, ServerPid} = start_http_server(
+    {Port, ServerPid, _TestRef} = start_http_server(
         401,
         <<"{\"error\":{\"message\":\"Invalid API key\"}}">>
     ),
@@ -1258,7 +1258,7 @@ http_function_call_is_normalized_test() ->
         "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\"",
         "}]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -1307,7 +1307,7 @@ http_multiple_function_calls_preserve_order_test() ->
         "}",
         "]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -1342,7 +1342,7 @@ http_function_call_with_invalid_arguments_test() ->
         "\"arguments\":\"not-json\"",
         "}]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -1368,7 +1368,7 @@ http_tool_definition_is_sent_to_openai_test() ->
           "\"text\":\"Ready\""
           "}]}]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     Tool = #{
@@ -1395,7 +1395,11 @@ http_tool_definition_is_sent_to_openai_test() ->
         ),
 
         receive
-            {http_request, _RequestLine, _Headers, Body} ->
+            {http_request, TestRef, _RequestLine, _Headers, Body} ->
+                ?assertNotEqual(
+                    nomatch,
+                    binary:match(Body, <<"\"tools\"">>)
+                ),
                 Payload = json:decode(Body),
 
                 [OpenAITool] = maps:get(<<"tools">>, Payload),
@@ -1405,8 +1409,8 @@ http_tool_definition_is_sent_to_openai_test() ->
                     maps:get(<<"type">>, OpenAITool)
                 ),
                 ?assertEqual(
-                    <<"get_weather">>,
-                    maps:get(<<"name">>, OpenAITool)
+                     <<"get_weather">>,
+                     maps:get(<<"name">>, OpenAITool)
                 ),
                 ?assertEqual(
                     <<"Get the current weather">>,
@@ -1429,8 +1433,7 @@ http_tool_definition_is_sent_to_openai_test() ->
 
                 ?assertEqual(
                     <<"string">>,
-                    maps:get(<<"type">>, City)
-                )
+                    maps:get(<<"type">>, City))
         after 5000 ->
             error(http_request_not_received)
         end
@@ -1451,7 +1454,7 @@ http_request_without_tools_omits_tools_field_test() ->
           "\"text\":\"Hello\""
           "}]}]}">>,
 
-    {Port, ServerPid} = start_http_server(ResponseBody),
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
     Config = http_test_config(Port),
 
     try
@@ -1461,7 +1464,7 @@ http_request_without_tools_omits_tools_field_test() ->
         ),
 
         receive
-            {http_request, _RequestLine, _Headers, Body} ->
+            {http_request, TestRef, _RequestLine, _Headers, Body} ->
                 Payload = json:decode(Body),
                 ?assertEqual(false, maps:is_key(<<"tools">>, Payload))
         after 5000 ->
@@ -1519,12 +1522,13 @@ start_http_server(Status, ResponseBody) ->
     {ok, {_Address, Port}} = inet:sockname(ListenSocket),
 
     Parent = self(),
+    TestRef = make_ref(),
 
     ServerPid = spawn(fun() ->
         try
             {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
             {RequestLine, Headers, Body} = read_http_request(Socket),
-            Parent ! {http_request, RequestLine, Headers, Body},
+            Parent ! {http_request, TestRef, RequestLine, Headers, Body},
 
             Response = <<
                 "HTTP/1.1 ",
@@ -1549,7 +1553,7 @@ start_http_server(Status, ResponseBody) ->
         end
     end),
 
-    {Port, ServerPid}.
+    {Port, ServerPid, TestRef}.
 
 -spec start_http_stream_server_with_content_type(binary(), binary()) ->
     {inet:port_number(), pid()}.
