@@ -735,6 +735,102 @@ generate_stream_rejects_inconsistent_generation_id_test() ->
         ok
     end.
 
+llm_stream_rejects_inconsistent_generation_id_test() ->
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    Result = hayata_llm:generate_stream(
+        #{
+            adapter => hayata_llm_inconsistent_generation_id_adapter,
+            model => <<"mock-model">>
+        },
+        #{
+            messages => [
+                #{
+                    role => user,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                }
+            ]
+        },
+        Consumer
+    ),
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => inconsistent_generation_id
+        }},
+        Result
+    ),
+
+    receive
+        {stream_event, _Event} ->
+            ok
+    after 1000 ->
+        error(first_stream_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, _UnexpectedEvent} ->
+            error(inconsistent_event_was_delivered)
+    after 100 ->
+        ok
+    end.
+
+llm_stream_rejects_event_after_generation_failed_test() ->
+    Parent = self(),
+    GenerationId = make_ref(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    Result = hayata_llm:generate_stream(
+        #{
+            adapter => hayata_llm_event_after_failure_adapter,
+            model => <<"mock-model">>
+        },
+        #{
+            messages => [
+                #{
+                    role => user,
+                    content => [
+                        #{type => text, text => <<"Hello">>}
+                    ]
+                }
+            ]
+        },
+        Consumer
+    ),
+
+    ?assertMatch(
+        {error, _Reason},
+        Result
+    ),
+
+    receive
+        {stream_event, #{
+            type := generation_failed,
+            generation_id := GenerationId
+        }} ->
+            ok
+    after 1000 ->
+        error(generation_failed_event_not_delivered)
+    end,
+
+    receive
+        {stream_event, _UnexpectedEvent} ->
+            error(event_after_generation_failure_was_delivered)
+    after 100 ->
+        ok
+    end.
 -spec config() -> hayata_llm:config().
 config() ->
     #{

@@ -4891,6 +4891,326 @@ llm_stream_rejects_invalid_adapter_event_test() ->
         )
     end).
 
+
+llm_stream_generation_failed_is_published_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"Hello">>
+                            }
+                        ]
+                    }
+                ],
+                case LLMStream(#{messages => Messages}) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_generation_failed_stream_adapter,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, ask_llm, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        LLMEvents = [
+            Event
+            || Event <- Events,
+               lists:prefix(
+                   "llm_",
+                   atom_to_list(maps:get(type, Event))
+               )
+        ],
+
+        ?assertEqual(
+            [llm_generation_failed],
+            [maps:get(type, Event) || Event <- LLMEvents]
+        ),
+
+        [FailedEvent] = LLMEvents,
+        Data = maps:get(data, FailedEvent),
+
+        ?assertEqual(ask_llm, maps:get(node_id, Data)),
+        ?assertEqual(
+            <<"generation-failure-test">>,
+            maps:get(generation_id, Data)
+        ),
+
+        Sequences = [
+            maps:get(sequence, Event)
+            || Event <- Events
+        ],
+        ?assertEqual(
+            lists:seq(1, length(Events)),
+            Sequences
+        ),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertMatch(
+            #{
+                llm_error := #{
+                    code := provider_error,
+                    reason := simulated_generation_failure
+                }
+            },
+            Result
+        )
+    end).
+
+llm_stream_provider_error_is_preserved_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Request = #{
+                    messages => [
+                        #{
+                            role => user,
+                            content => [
+                                #{
+                                    type => text,
+                                    text => <<"Hello">>
+                                }
+                            ]
+                        }
+                    ]
+                },
+                case LLMStream(Request) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_provider_error_stream_adapter,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, ask_llm, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        LLMEvents = [
+            Event
+            || Event <- Events,
+               lists:prefix(
+                   "llm_",
+                   atom_to_list(maps:get(type, Event))
+               )
+        ],
+
+        ?assertEqual([], LLMEvents),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertMatch(
+            #{
+                llm_error := #{
+                    code := provider_error,
+                    reason := simulated_provider_failure
+                }
+            },
+            Result
+        )
+    end).
+
+llm_stream_tool_call_events_are_published_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Request = #{
+                    messages => [
+                        #{
+                            role => user,
+                            content => [
+                                #{
+                                    type => text,
+                                    text => <<"Call a tool">>
+                                }
+                            ]
+                        }
+                    ]
+                },
+                case LLMStream(Request) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_tool_stream_adapter,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, ask_llm, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        LLMEvents = [
+            Event
+            || Event <- Events,
+               lists:prefix(
+                   "llm_",
+                   atom_to_list(maps:get(type, Event))
+               )
+        ],
+
+        ?assertEqual(
+            [
+                llm_tool_call_started,
+                llm_tool_call_delta,
+                llm_tool_call_completed,
+                llm_generation_completed
+            ],
+            [maps:get(type, Event) || Event <- LLMEvents]
+        ),
+
+        ?assert(lists:all(
+            fun(Event) ->
+                Data = maps:get(data, Event),
+                maps:get(node_id, Data) =:= ask_llm
+            end,
+            LLMEvents
+        )),
+
+        GenerationIds = lists:usort([
+            maps:get(generation_id, maps:get(data, Event))
+            || Event <- LLMEvents
+        ]),
+        ?assertEqual(1, length(GenerationIds)),
+
+        Sequences = [
+            maps:get(sequence, Event)
+            || Event <- Events
+        ],
+        ?assertEqual(
+            lists:seq(1, length(Events)),
+            Sequences
+        ),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+        ?assertMatch(#{llm_response := #{}}, Result)
+    end).
+
+llm_stream_is_unavailable_when_subscription_disabled_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Request = #{
+                    messages => [
+                        #{
+                            role => user,
+                            content => [
+                                #{
+                                    type => text,
+                                    text => <<"Hello">>
+                                }
+                            ]
+                        }
+                    ]
+                },
+                case LLMStream(Request) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, ask_llm, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{
+                llm_error := #{
+                    code := unsupported_capability,
+                    capability := streaming
+                }
+            },
+            Result
+        )
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),
