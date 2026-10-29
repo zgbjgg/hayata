@@ -227,10 +227,15 @@ validate_response(
         {assistant, Content, true} when is_list(Content) ->
             case validate_tool_calls(Message) of
                 ok ->
-                    {ok, Response};
-                {error, _Reason} ->
-                    {error, #{code => invalid_response}}
-            end;
+                    case validate_finish_reason(FinishReason, Message) of
+                        ok ->
+                            {ok, Response};
+                        {error, _Reason} ->
+                            {error, #{code => invalid_response}}
+                    end;
+               {error, _Reason} ->
+                   {error, #{code => invalid_response}}
+           end;
         _ ->
             {error, #{code => invalid_response}}
     end;
@@ -248,6 +253,23 @@ valid_finish_reason(FinishReason) ->
             content_filter
         ]
     ).
+
+-spec validate_finish_reason(atom(), map()) ->
+    ok | {error, invalid_finish_reason}.
+validate_finish_reason(tool_calls, Message) ->
+    case maps:get(tool_calls, Message, []) of
+        [_First | _Rest] ->
+            ok;
+        _ ->
+            {error, invalid_finish_reason}
+    end;
+validate_finish_reason(_FinishReason, Message) ->
+    case maps:get(tool_calls, Message, []) of
+        [] ->
+            ok;
+        _ ->
+            {error, invalid_finish_reason}
+    end.
 
 -spec validate_tool_calls(map()) -> ok | {error, invalid_tool_calls}.
 validate_tool_calls(Message) ->

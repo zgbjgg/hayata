@@ -112,8 +112,16 @@ validate_response_shape(
     case valid_finish_reason(FinishReason) of
         true ->
             case response_tool_calls(Response) of
-                {ok, _ToolCalls} ->
-                    {ok, Response};
+                {ok, ToolCalls} ->
+                    case validate_finish_reason_consistency(
+                        FinishReason,
+                        ToolCalls
+                    ) of
+                        ok ->
+                            {ok, Response};
+                        {error, _Reason} ->
+                            {error, invalid_llm_response}
+                    end;
                 {error, _Reason} ->
                     {error, invalid_llm_response}
             end;
@@ -134,6 +142,17 @@ valid_finish_reason(FinishReason) ->
             content_filter
         ]
     ).
+
+-spec validate_finish_reason_consistency(atom(), [map()]) ->
+    ok | {error, invalid_finish_reason}.
+validate_finish_reason_consistency(tool_calls, [_First | _Rest]) ->
+    ok;
+validate_finish_reason_consistency(tool_calls, []) ->
+    {error, invalid_finish_reason};
+validate_finish_reason_consistency(_FinishReason, []) ->
+    ok;
+validate_finish_reason_consistency(_FinishReason, _ToolCalls) ->
+    {error, invalid_finish_reason}.
 
 -spec response_tool_calls(map()) ->
     {ok, [map()]} | {error, invalid_tool_calls}.

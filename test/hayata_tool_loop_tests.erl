@@ -455,6 +455,55 @@ run_rejects_invalid_finish_reason_test() ->
         hayata_tool_loop:run(LLM, Request, [], 3)
     ).
 
+run_rejects_tool_calls_finish_reason_without_calls_test() ->
+    LLM = fun(_Request) ->
+        {ok, #{
+            message => #{
+                role => assistant,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"No tool calls were returned.">>
+                    }
+                ]
+            },
+            finish_reason => tool_calls
+        }}
+    end,
+
+    ?assertEqual(
+        {error, {llm_failed, invalid_llm_response}},
+        hayata_tool_loop:run(LLM, request(), [], 3)
+    ).
+
+run_rejects_tool_calls_with_stop_finish_reason_test() ->
+    LLM = fun(_Request) ->
+        {ok, #{
+            message => #{
+                role => assistant,
+                content => [],
+                tool_calls => [
+                    #{
+                        id => <<"call_123">>,
+                        name => <<"get_weather">>,
+                        arguments => #{city => <<"Mexico City">>}
+                    }
+                ]
+            },
+            finish_reason => stop
+        }}
+    end,
+
+    ?assertEqual(
+        {error, {llm_failed, invalid_llm_response}},
+        hayata_tool_loop:run(
+            LLM,
+            request(),
+            [weather_tool()],
+            3
+        )
+    ).
+
 -spec request() -> map().
 request() ->
     #{

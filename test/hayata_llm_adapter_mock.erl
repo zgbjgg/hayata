@@ -151,6 +151,34 @@ response(invalid_finish_reason) ->
             ]
         },
         finish_reason => unknown_reason
+    };
+response(tool_calls_without_calls) ->
+    #{
+        message => #{
+            role => assistant,
+            content => [
+                #{
+                    type => text,
+                    text => <<"No tool calls were returned.">>
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    };
+response(tool_calls_with_stop) ->
+    #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_123">>,
+                    name => <<"get_weather">>,
+                    arguments => #{city => <<"Mexico City">>}
+                }
+            ]
+        },
+        finish_reason => stop
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].

@@ -197,6 +197,30 @@ generate_rejects_invalid_finish_reason_test() ->
         hayata_llm:generate(Config, valid_request())
     ).
 
+generate_rejects_tool_calls_finish_reason_without_calls_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => tool_calls_without_calls
+        }
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
+generate_rejects_tool_calls_with_stop_finish_reason_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => tool_calls_with_stop
+        }
+    },
+
+    ?assertEqual(
+        {error, #{code => invalid_response}},
+        hayata_llm:generate(Config, valid_request())
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
