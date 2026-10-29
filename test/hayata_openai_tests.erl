@@ -868,6 +868,48 @@ http_stream_authentication_error_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_ended_without_completion_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_incomplete\"}}\n\n",
+        "event: response.output_text.delta\n",
+        "data: {\"delta\":\"Partial\","
+        "\"output_index\":0,\"content_index\":0}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            Result
+        ),
+
+        EventTypes = receive_stream_event_types(2, []),
+
+        ?assertEqual(
+            [message_started, content_delta],
+            EventTypes
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
