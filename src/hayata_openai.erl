@@ -287,23 +287,56 @@ convert_messages([], Acc) ->
 convert_messages([Message | Rest], Acc) ->
     case convert_message(Message) of
         {ok, Converted} ->
-            convert_messages(Rest, [Converted | Acc]);
+            convert_messages(Rest, lists:reverse(Converted) ++ Acc);
         {error, Reason} ->
             {error, Reason}
     end.
 
 -spec convert_message(map()) ->
-    {ok, map()} | {error, term()}.
+    {ok, [map()]} | {error, term()}.
+convert_message(#{
+    role := assistant,
+    content := Content,
+    tool_calls := ToolCalls
+}) when is_list(Content), is_list(ToolCalls) ->
+    case convert_content(Content, []) of
+        {ok, TextBlocks} ->
+            convert_assistant_tool_message(
+                lists:reverse(TextBlocks),
+                ToolCalls
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_message(#{
+    role := tool,
+    tool_call_id := CallId,
+    content := Content
+}) when is_binary(CallId), is_list(Content) ->
+    case convert_tool_output(Content, []) of
+        {ok, Output} ->
+            {ok, [
+                #{
+                    <<"type">> => <<"function_call_output">>,
+                    <<"call_id">> => CallId,
+                    <<"output">> => Output
+                }
+            ]};
+        {error, Reason} ->
+            {error, Reason}
+    end;
 convert_message(#{role := Role, content := Content})
         when is_atom(Role), is_list(Content) ->
     case lists:member(Role, [system, developer, user, assistant]) of
         true ->
             case convert_content(Content, []) of
                 {ok, TextBlocks} ->
-                    {ok, #{
-                        <<"role">> => atom_to_binary(Role, utf8),
-                        <<"content">> => lists:reverse(TextBlocks)
-                    }};
+                    {ok, [
+                        #{
+                            <<"role">> => atom_to_binary(Role, utf8),
+                            <<"content">> => lists:reverse(TextBlocks)
+                        }
+                    ]};
                 {error, Reason} ->
                     {error, Reason}
             end;
@@ -312,6 +345,98 @@ convert_message(#{role := Role, content := Content})
     end;
 convert_message(_Message) ->
     {error, invalid_message}.
+
+-spec convert_assistant_tool_message([map()], [map()]) ->
+    {ok, [map()]} | {error, term()}.
+convert_assistant_tool_message(TextBlocks, ToolCalls) ->
+    case convert_tool_calls(ToolCalls, []) of
+        {ok, ConvertedCalls} ->
+            MessageItems = case TextBlocks of
+                [] ->
+                    [];
+                _ ->
+                    [#{
+                        <<"role">> => <<"assistant">>,
+                        <<"content">> => TextBlocks
+                    }]
+            end,
+            {ok, MessageItems ++ ConvertedCalls};
+        {error, Reason} ->
+            {error, Reason}
+    end.
+
+-spec convert_tool_calls([map()], [map()]) ->
+    {ok, [map()]} | {error, term()}.
+convert_tool_calls([], Acc) ->
+    {ok, lists:reverse(Acc)};
+convert_tool_calls([
+    #{
+        id := CallId,
+        name := Name,
+        arguments := Arguments
+    } | Rest
+], Acc)
+        when is_binary(CallId), byte_size(CallId) > 0,
+             is_binary(Name), byte_size(Name) > 0,
+             is_map(Arguments) ->
+    case encode_tool_arguments(Arguments) of
+        {ok, EncodedArguments} ->
+            Call = #{
+                <<"type">> => <<"function_call">>,
+                <<"call_id">> => CallId,
+                <<"name">> => Name,
+                <<"arguments">> => EncodedArguments
+            },
+            convert_tool_calls(Rest, [Call | Acc]);
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_tool_calls(_ToolCalls, _Acc) ->
+    {error, invalid_tool_call}.
+
+-spec encode_tool_arguments(map()) -> {ok, binary()} | {error, term()}.
+encode_tool_arguments(Arguments) ->
+    try json:encode(normalize_json_keys(Arguments)) of
+        Encoded when is_binary(Encoded) ->
+            {ok, Encoded};
+        Encoded ->
+            {ok, iolist_to_binary(Encoded)}
+    catch
+        _:_ ->
+            {error, invalid_tool_arguments}
+    end.
+
+-spec normalize_json_keys(map()) -> map().
+normalize_json_keys(Map) when is_map(Map) ->
+    maps:from_list([
+        {normalize_json_key(Key), normalize_json_value(Value)}
+        || {Key, Value} <- maps:to_list(Map)
+    ]).
+
+-spec normalize_json_key(atom() | binary()) -> binary().
+normalize_json_key(Key) when is_atom(Key) ->
+    atom_to_binary(Key, utf8);
+normalize_json_key(Key) when is_binary(Key) ->
+    Key.
+
+-spec normalize_json_value(term()) -> term().
+normalize_json_value(Value) when is_map(Value) ->
+    normalize_json_keys(Value);
+normalize_json_value(Value) when is_list(Value) ->
+    [normalize_json_value(Item) || Item <- Value];
+normalize_json_value(Value) ->
+    Value.
+
+-spec convert_tool_output(list(), list()) ->
+    {ok, binary()} | {error, term()}.
+convert_tool_output([], Acc) ->
+    {ok, iolist_to_binary(lists:reverse(Acc))};
+convert_tool_output([
+    #{type := text, text := Text} | Rest
+], Acc) when is_binary(Text) ->
+    convert_tool_output(Rest, [Text | Acc]);
+convert_tool_output(_Content, _Acc) ->
+    {error, unsupported_content}.
 
 -spec convert_content(list(), list()) ->
     {ok, list()} | {error, term()}.

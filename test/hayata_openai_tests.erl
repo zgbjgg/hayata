@@ -1474,6 +1474,112 @@ http_request_without_tools_omits_tools_field_test() ->
         exit(ServerPid, kill)
     end.
 
+http_tool_history_is_converted_to_responses_input_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_tool_history\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"The weather is sunny.\""
+          "}]}]}">>,
+
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    [UserMessage] = maps:get(messages, valid_request()),
+
+    AssistantMessage = #{
+        role => assistant,
+        content => [],
+        tool_calls => [
+            #{
+                id => <<"call_123">>,
+                name => <<"get_weather">>,
+                arguments => #{city => <<"Mexico City">>}
+            }
+        ]
+    },
+
+    ToolMessage = #{
+        role => tool,
+        tool_call_id => <<"call_123">>,
+        name => <<"get_weather">>,
+        content => [
+            #{
+                type => text,
+                text => <<"{\"temperature\":22}">>
+            }
+        ]
+    },
+
+    Request = (valid_request())#{
+        messages => [
+            UserMessage,
+            AssistantMessage,
+            ToolMessage
+        ]
+    },
+
+    try
+        ?assertMatch(
+            {ok, #{finish_reason := stop}},
+            hayata_openai:generate(Request, Config)
+        ),
+
+        receive
+            {http_request, TestRef, _RequestLine, _Headers, Body} ->
+                Payload = json:decode(Body),
+                Input = maps:get(<<"input">>, Payload),
+
+                ?assertEqual(3, length(Input)),
+
+                [UserInput, FunctionCall, FunctionOutput] = Input,
+
+                ?assertEqual(
+                    <<"user">>,
+                    maps:get(<<"role">>, UserInput)
+                ),
+ 
+                ?assertEqual(
+                    <<"function_call">>,
+                    maps:get(<<"type">>, FunctionCall)
+                ),
+                ?assertEqual(
+                    <<"call_123">>,
+                    maps:get(<<"call_id">>, FunctionCall)
+                ),
+                ?assertEqual(
+                    <<"get_weather">>,
+                    maps:get(<<"name">>, FunctionCall)
+                ),
+                ?assertEqual(
+                    #{<<"city">> => <<"Mexico City">>},
+                    json:decode(maps:get(<<"arguments">>, FunctionCall))
+                ),
+
+                ?assertEqual(
+                    <<"function_call_output">>,
+                    maps:get(<<"type">>, FunctionOutput)
+                ),
+                ?assertEqual(
+                    <<"call_123">>,
+                    maps:get(<<"call_id">>, FunctionOutput)
+                ),
+                ?assertEqual(
+                    <<"{\"temperature\":22}">>,
+                    maps:get(<<"output">>, FunctionOutput)
+                )
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
