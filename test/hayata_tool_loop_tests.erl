@@ -798,6 +798,66 @@ run_recovers_from_explicit_tool_error_test() ->
         error(missing_tool_error_result)
     end.
 
+run_handles_llm_callback_exception_test() ->
+    LLM = fun(_Request) ->
+        erlang:error(provider_crashed)
+    end,
+
+    ?assertEqual(
+        {error, {llm_failed, llm_call_failed}},
+        hayata_tool_loop:run(LLM, request(), [], 3)
+    ).
+
+run_rejects_unexpected_llm_return_value_test() ->
+    InvalidReturns = [
+        ok,
+        undefined,
+        {ok, <<"not a response map">>},
+        {unexpected, response}
+    ],
+
+    lists:foreach(
+        fun(InvalidReturn) ->
+            LLM = fun(_Request) -> InvalidReturn end,
+
+            ?assertEqual(
+                {error, {llm_failed, invalid_llm_response}},
+                hayata_tool_loop:run(LLM, request(), [], 3)
+            )
+        end,
+        InvalidReturns
+    ).
+
+run_rejects_malformed_response_fields_test() ->
+    InvalidResponses = [
+        #{
+            message => #{
+                role => assistant,
+                content => <<"not a list">>
+            },
+            finish_reason => stop
+        },
+        #{
+            message => #{
+                role => assistant,
+                content => []
+            },
+            finish_reason => <<"stop">>
+        }
+    ],
+
+    lists:foreach(
+        fun(Response) ->
+            LLM = fun(_Request) -> {ok, Response} end,
+
+            ?assertEqual(
+                {error, {llm_failed, invalid_llm_response}},
+                hayata_tool_loop:run(LLM, request(), [], 3)
+            )
+        end,
+        InvalidResponses
+    ).
+
 -spec request() -> map().
 request() ->
     #{
