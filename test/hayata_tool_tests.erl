@@ -272,6 +272,41 @@ validate_registry_rejects_duplicate_required_property_test() ->
         hayata_tool:validate_registry([Tool])
     ).
 
+validate_registry_rejects_duplicate_normalized_properties_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string},
+                <<"city">> => #{type => integer}
+            }
+        }
+    },
+
+    ?assertEqual(
+        {error, {
+            invalid_tool,
+            {duplicate_property, <<"city">>}
+        }},
+        hayata_tool:validate_registry([Tool])
+    ).
+
+validate_registry_accepts_normalized_required_property_test() ->
+    Tool = (weather_tool())#{
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        }
+    },
+
+    ?assertEqual(
+        ok,
+        hayata_tool:validate_registry([Tool])
+    ).
+
 -spec weather_tool() -> map().
 weather_tool() ->
     #{

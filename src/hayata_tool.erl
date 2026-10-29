@@ -301,24 +301,43 @@ validate_parameter_schema(#{type := object, properties := Properties} = Schema)
 validate_parameter_schema(_Schema) ->
     {error, invalid_parameters_schema}.
 
+
 -spec validate_properties([{term(), term()}]) -> ok | {error, term()}.
-validate_properties([{Name, Schema} | Rest]) when is_map(Schema) ->
-    case {normalize_key(Name), maps:get(type, Schema, undefined)} of
-        {{ok, _NormalizedName}, Type}
-                when Type =:= string;
-                     Type =:= number;
-                     Type =:= integer;
-                     Type =:= boolean;
-                     Type =:= object ->
-            validate_properties(Rest);
-        {{ok, _NormalizedName}, _Type} ->
-            {error, invalid_property_schema};
-        {error, _Type} ->
+validate_properties(Properties) ->
+    validate_properties(Properties, []).
+
+-spec validate_properties(
+    [{term(), term()}],
+    [binary()]
+) -> ok | {error, term()}.
+validate_properties([{Name, Schema} | Rest], Seen) when is_map(Schema) ->
+    case normalize_key(Name) of
+        {ok, NormalizedName} ->
+            case lists:member(NormalizedName, Seen) of
+                true ->
+                    {error, {duplicate_property, NormalizedName}};
+                false ->
+                    case maps:get(type, Schema, undefined) of
+                        Type
+                                when Type =:= string;
+                                     Type =:= number;
+                                     Type =:= integer;
+                                     Type =:= boolean;
+                                     Type =:= object ->
+                            validate_properties(
+                                Rest,
+                                [NormalizedName | Seen]
+                            );
+                        _Other ->
+                            {error, invalid_property_schema}
+                    end
+            end;
+        error ->
             {error, invalid_property_name}
     end;
-validate_properties([{_Name, _Schema} | _Rest]) ->
+validate_properties([{_Name, _Schema} | _Rest], _Seen) ->
     {error, invalid_property_schema};
-validate_properties([]) ->
+validate_properties([], _Seen) ->
     ok.
 
 -spec validate_required_schema(term(), map()) -> ok | {error, term()}.
