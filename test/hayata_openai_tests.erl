@@ -2368,6 +2368,203 @@ openai_capabilities_are_independent_of_config_test() ->
 
     ?assertEqual(DefaultCapabilities, CustomCapabilities).
 
+http_mixed_valid_and_malformed_tool_calls_are_rejected_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_mixed_invalid\","
+          "\"status\":\"completed\","
+          "\"output\":["
+          "{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_valid\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Puebla\\\"}\""
+          "},"
+          "{"
+          "\"type\":\"function_call\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}"
+          "]}">>,
+
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_history_preserves_unicode_and_nested_arguments_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_history_unicode\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"OK\""
+          "}]}]}">>,
+
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    [UserMessage] = maps:get(messages, valid_request()),
+
+    Arguments = #{
+        city => unicode:characters_to_binary("Puebla, México 🌦️"),
+        note => <<>>,
+        options => #{
+            units => unicode:characters_to_binary("°C"),
+            days => [1, 2],
+            enabled => true
+        }
+    },
+
+    AssistantMessage = #{
+        role => assistant,
+        content => [],
+        tool_calls => [
+            #{
+                id => <<"call_unicode">>,
+                name => <<"get_weather">>,
+                arguments => Arguments
+            }
+        ]
+    },
+
+    Request = (valid_request())#{
+        messages => [UserMessage, AssistantMessage]
+    },
+
+    try
+        ?assertMatch(
+            {ok, #{finish_reason := stop}},
+            hayata_openai:generate(Request, Config)
+        ),
+
+        receive
+            {http_request, TestRef, _Line, _Headers, Body} ->
+                Payload = json:decode(Body),
+                [_, FunctionCall] = maps:get(<<"input">>, Payload),
+                EncodedArguments = maps:get(
+                    <<"arguments">>,
+                    FunctionCall
+                ),
+                DecodedArguments = json:decode(EncodedArguments),
+
+                ?assertEqual(
+                    <<"call_unicode">>,
+                    maps:get(<<"call_id">>, FunctionCall)
+                ),
+                ?assertEqual(
+                    unicode:characters_to_binary("Puebla, México 🌦️"),
+                    maps:get(<<"city">>, DecodedArguments)
+                ),
+                ?assertEqual(
+                    unicode:characters_to_binary("°C"),
+                    maps:get(<<"units">>, maps:get(<<"options">>, DecodedArguments))
+                ),
+                ?assertEqual(
+                    <<>>,
+                    maps:get(<<"note">>, DecodedArguments)
+                ),
+                ?assertEqual(
+                    #{
+                        <<"units">> => unicode:characters_to_binary("°C"),
+                        <<"days">> => [1, 2],
+                        <<"enabled">> => true
+                    },
+                    maps:get(<<"options">>, DecodedArguments)
+                )
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_history_preserves_empty_tool_output_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_empty_output\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"OK\""
+          "}]}]}">>,
+
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    [UserMessage] = maps:get(messages, valid_request()),
+
+    AssistantMessage = #{
+        role => assistant,
+        content => [],
+        tool_calls => [
+            #{
+                id => <<"call_empty">>,
+                name => <<"get_weather">>,
+                arguments => #{city => <<"Puebla">>}
+            }
+        ]
+    },
+
+    ToolMessage = #{
+        role => tool,
+        tool_call_id => <<"call_empty">>,
+        name => <<"get_weather">>,
+        content => [#{type => text, text => <<>>}]
+    },
+
+    Request = (valid_request())#{
+        messages => [UserMessage, AssistantMessage, ToolMessage]
+    },
+
+    try
+        ?assertMatch(
+            {ok, #{finish_reason := stop}},
+            hayata_openai:generate(Request, Config)
+        ),
+
+        receive
+            {http_request, TestRef, _Line, _Headers, Body} ->
+                Payload = json:decode(Body),
+                [_, _, FunctionOutput] = maps:get(
+                    <<"input">>,
+                    Payload
+                ),
+
+                ?assertEqual(
+                    <<"function_call_output">>,
+                    maps:get(<<"type">>, FunctionOutput)
+                ),
+                ?assertEqual(
+                    <<"call_empty">>,
+                    maps:get(<<"call_id">>, FunctionOutput)
+                ),
+                ?assertEqual(
+                    <<>>,
+                    maps:get(<<"output">>, FunctionOutput)
+                )
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
