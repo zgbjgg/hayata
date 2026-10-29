@@ -1715,6 +1715,235 @@ http_tool_loop_completes_end_to_end_test() ->
         exit(ServerPid, kill)
     end.
 
+http_tool_loop_completes_multiple_tool_rounds_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    WeatherCallResponse =
+        <<"{\"id\":\"resp_weather_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_weather\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    ForecastCallResponse =
+        <<"{\"id\":\"resp_forecast_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_forecast\","
+          "\"name\":\"get_forecast\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    FinalResponse =
+        <<"{\"id\":\"resp_final\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"The weather is sunny and the forecast is clear.\""
+          "}]}]}">>,
+
+    {Port, ServerPid, TestRef} =
+        start_http_server_sequence([
+            WeatherCallResponse,
+            ForecastCallResponse,
+            FinalResponse
+        ]),
+
+    Config = http_test_config(Port),
+
+    WeatherTool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(Arguments) ->
+            case maps:get(<<"city">>, Arguments) of
+                <<"Mexico City">> ->
+                    {ok, #{
+                        temperature => 22,
+                        conditions => <<"sunny">>
+                    }};
+                _ ->
+                    {error, unknown_city}
+            end
+        end
+    },
+
+    ForecastTool = #{
+        name => <<"get_forecast">>,
+        description => <<"Gets the forecast for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(Arguments) ->
+            case maps:get(<<"city">>, Arguments) of
+                <<"Mexico City">> ->
+                    {ok, #{forecast => <<"clear">>}};
+                _ ->
+                    {error, unknown_city}
+            end
+        end
+    },
+
+    Request = #{
+        model => <<"mock-model">>,
+        messages => [
+            #{
+                role => user,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"Give me the weather and forecast for Mexico City.">>
+                    }
+                ]
+            }
+        ]
+    },
+
+    LLM = fun(LLMRequest) ->
+        hayata_openai:generate(LLMRequest, Config)
+    end,
+
+    try
+        {ok, Result} = hayata_tool_loop:run(
+            LLM,
+            Request,
+            [WeatherTool, ForecastTool],
+            5
+        ),
+
+        ?assertEqual(3, maps:get(iterations, Result)),
+        ?assertEqual(
+            <<"The weather is sunny and the forecast is clear.">>,
+            response_text(maps:get(response, Result))
+        ),
+
+        receive
+            {http_request, TestRef, _Line1, _Headers1, Body1} ->
+                Payload1 = json:decode(Body1),
+                Input1 = maps:get(<<"input">>, Payload1),
+
+                ?assertEqual(1, length(Input1)),
+                ?assert(maps:is_key(<<"tools">>, Payload1))
+        after 5000 ->
+            error(first_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line2, _Headers2, Body2} ->
+                Payload2 = json:decode(Body2),
+                Input2 = maps:get(<<"input">>, Payload2),
+
+                ?assertEqual(3, length(Input2)),
+
+                [_User2, WeatherCall, WeatherOutput] = Input2,
+
+                ?assertEqual(
+                    <<"call_weather">>,
+                    maps:get(<<"call_id">>, WeatherCall)
+                ),
+                ?assertEqual(
+                    <<"function_call_output">>,
+                    maps:get(<<"type">>, WeatherOutput)
+                ),
+                ?assertEqual(
+                    <<"call_weather">>,
+                    maps:get(<<"call_id">>, WeatherOutput)
+                ),
+
+                WeatherResult = json:decode(
+                    maps:get(<<"output">>, WeatherOutput)
+                ),
+
+                ?assertEqual(
+                    22,
+                    maps:get(<<"temperature">>, WeatherResult)
+                ),
+                ?assertEqual(
+                    <<"sunny">>,
+                    maps:get(<<"conditions">>, WeatherResult)
+                )
+        after 5000 ->
+            error(second_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line3, _Headers3, Body3} ->
+                Payload3 = json:decode(Body3),
+                Input3 = maps:get(<<"input">>, Payload3),
+
+                ?assertEqual(5, length(Input3)),
+
+                [
+                    _User3,
+                    WeatherCall3,
+                    WeatherOutput3,
+                    ForecastCall3,
+                    ForecastOutput3
+                ] = Input3,
+
+                ?assertEqual(
+                    <<"function_call">>,
+                    maps:get(<<"type">>, ForecastCall3)
+                ),
+                ?assertEqual(
+                    <<"call_forecast">>,
+                    maps:get(<<"call_id">>, ForecastCall3)
+                ),
+                ?assertEqual(
+                    <<"get_forecast">>,
+                    maps:get(<<"name">>, ForecastCall3)
+                ),
+
+                ?assertEqual(
+                    <<"function_call_output">>,
+                    maps:get(<<"type">>, ForecastOutput3)
+                ),
+                ?assertEqual(
+                    <<"call_forecast">>,
+                    maps:get(<<"call_id">>, ForecastOutput3)
+                ),
+
+                ForecastResult = json:decode(
+                    maps:get(<<"output">>, ForecastOutput3)
+                ),
+
+                ?assertEqual(
+                    <<"clear">>,
+                    maps:get(<<"forecast">>, ForecastResult)
+                ),
+
+                %% The first round must remain in the conversation.
+                ?assertEqual(
+                    <<"call_weather">>,
+                    maps:get(<<"call_id">>, WeatherCall3)
+                ),
+                ?assertEqual(
+                    <<"call_weather">>,
+                    maps:get(<<"call_id">>, WeatherOutput3)
+                )
+        after 5000 ->
+            error(third_http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),

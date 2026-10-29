@@ -557,6 +557,116 @@ run_recovers_from_non_serializable_tool_result_test() ->
         error(missing_non_serializable_tool_result)
     end.
 
+run_propagates_llm_error_after_tool_execution_test() ->
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! tool_executed_after_first_response,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(Request) ->
+        case length(maps:get(messages, Request)) of
+            1 ->
+                {ok, tool_call_response()};
+            _ ->
+                {error, provider_unavailable}
+        end
+    end,
+
+    Result = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [Tool],
+        5
+    ),
+
+    ?assertEqual(
+        {error, {llm_failed, provider_unavailable}},
+        Result
+    ),
+
+    receive
+        tool_executed_after_first_response ->
+            ok
+    after 1000 ->
+        error(tool_was_not_executed)
+    end.
+
+run_preserves_assistant_content_with_tool_calls_test() ->
+    Parent = self(),
+
+    AssistantMessage = #{
+        role => assistant,
+        content => [
+            #{
+                type => text,
+                text => <<"I will check the current weather.">>
+            }
+        ],
+        tool_calls => [
+            #{
+                id => <<"call_123">>,
+                name => <<"get_weather">>,
+                arguments => #{city => <<"Mexico City">>}
+            }
+        ]
+    },
+
+    LLM = fun(Request) ->
+        case maps:get(messages, Request) of
+            [_UserMessage] ->
+                {ok, #{
+                    message => AssistantMessage,
+                    finish_reason => tool_calls
+                }};
+            Messages ->
+                Parent ! {messages_after_tool_call, Messages},
+                {ok, text_response(<<"It is 22 degrees.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [weather_tool()],
+        5
+    ),
+
+    ?assertEqual(2, maps:get(iterations, Result)),
+    ?assertEqual(
+        <<"It is 22 degrees.">>,
+        response_text(maps:get(response, Result))
+    ),
+
+    receive
+        {messages_after_tool_call, Messages} ->
+            [_UserMessage, PreservedAssistant, ToolMessage] = Messages,
+
+            ?assertEqual(assistant, maps:get(role, PreservedAssistant)),
+            ?assertEqual(
+                <<"I will check the current weather.">>,
+                response_text(#{message => PreservedAssistant})
+            ),
+            ?assertEqual(
+                <<"call_123">>,
+                maps:get(tool_call_id, ToolMessage)
+            )
+    after 1000 ->
+        error(messages_after_tool_call_not_received)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
