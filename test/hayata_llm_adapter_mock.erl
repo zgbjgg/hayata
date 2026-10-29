@@ -38,7 +38,7 @@ generate(Request, Config) when is_map(Request) ->
         {{ok, Model}, {ok, Messages}}
                 when is_binary(Model), is_list(Messages) ->
             ResponseMode = maps:get(response_mode, Config, text),
-            {ok, response(ResponseMode)};
+            {ok, response(ResponseMode, Messages)};
         _ ->
             {error, #{code => invalid_request}}
     end;
@@ -59,6 +59,14 @@ generate_stream(Request, Config, Consumer)
     end;
 generate_stream(_Request, _Config, _Consumer) ->
     {error, #{code => invalid_request}}.
+
+-spec response(atom(), [map()]) -> hayata_llm_adapter:response().
+response(tool_loop, [_UserMessage]) ->
+    response(tool_call);
+response(tool_loop, Messages) when length(Messages) >= 3 ->
+    response(text);
+response(Mode, _Messages) ->
+    response(Mode).
 
 -spec response(atom()) -> hayata_llm_adapter:response().
 response(text) ->

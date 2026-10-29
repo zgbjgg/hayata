@@ -4287,6 +4287,97 @@ tool_loop_is_available_to_node_test() ->
             Result
         )
     end).
+
+tool_loop_executes_tool_and_returns_final_response_test() ->
+    Parent = self(),
+
+    WeatherTool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(Arguments) ->
+            Parent ! {weather_tool_executed, Arguments},
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm_with_tool_loop => fun(Context) ->
+                ToolLoop = maps:get(hayata_tool_loop, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"What is the weather?">>
+                            }
+                        ]
+                    }
+                ],
+                Request = #{messages => Messages},
+
+                case ToolLoop(Request, [WeatherTool], 3) of
+                    {ok, Result} ->
+                        #{tool_loop_result => Result};
+                    {error, Reason} ->
+                        #{tool_loop_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>,
+            provider_config => #{response_mode => tool_loop}
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, ask_llm_with_tool_loop, undefined};
+                1 ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ToolLoopResult = maps:get(tool_loop_result, Result),
+        Response = maps:get(response, ToolLoopResult),
+
+        ?assertEqual(2, maps:get(iterations, ToolLoopResult)),
+        ?assertEqual(stop, maps:get(finish_reason, Response)),
+
+        Message = maps:get(message, Response),
+        ?assertEqual(assistant, maps:get(role, Message)),
+
+        [Content] = maps:get(content, Message),
+        ?assertEqual(<<"Hello from Hayata.">>, maps:get(text, Content)),
+
+        receive
+            {weather_tool_executed, Arguments} ->
+                ?assertEqual(
+                    <<"Mexico City">>,
+                    maps:get(city, Arguments)
+                )
+        after 1000 ->
+            error(weather_tool_was_not_executed)
+        end
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),
