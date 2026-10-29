@@ -172,6 +172,54 @@ http_rate_limit_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+
+http_incomplete_response_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"status\":\"incomplete\","
+          "\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{
+                code => provider_error,
+                reason => max_output_tokens
+            }},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_invalid_json_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(<<"not-json">>),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+-spec http_test_config(inet:port_number()) -> map().
+http_test_config(Port) ->
+    #{
+        api_key => <<"test-key">>,
+        base_url => list_to_binary(
+            "http://127.0.0.1:" ++ integer_to_list(Port) ++ "/v1"
+        ),
+        timeout => 5000
+    }.
+
 -spec start_http_server(binary()) -> {inet:port_number(), pid()}.
 start_http_server(ResponseBody) ->
     start_http_server(200, ResponseBody).
