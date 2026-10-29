@@ -4488,13 +4488,13 @@ tool_loop_provider_error_is_preserved_in_agent_state_test() ->
 
         {ok, Result} = hayata_agent:get_result(Agent),
 
-        ?assertMatch(
+        ?assertEqual(
             #{
-                tool_loop_error := {
+                tool_loop_error => {
                     llm_failed,
                     #{
-                        code := provider_error,
-                        reason := adapter_call_failed
+                        code => provider_error,
+                        reason => adapter_call_failed
                     }
                 }
             },
