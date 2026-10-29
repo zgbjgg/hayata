@@ -264,6 +264,26 @@ generate_stream_normalizes_consumer_exception_test() ->
         )
     ).
 
+generate_stream_rejects_invalid_consumer_result_test() ->
+    Consumer = fun(_Event) ->
+        ignored
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                invalid_consumer_result
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
