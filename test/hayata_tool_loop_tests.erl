@@ -420,6 +420,41 @@ run_propagates_llm_provider_error_test() ->
         ok
     end.
 
+run_rejects_invalid_finish_reason_test() ->
+    LLM = fun(_Request) ->
+        {ok, #{
+            message => #{
+                role => assistant,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"Hello">>
+                    }
+                ]
+            },
+            finish_reason => unknown_reason
+        }}
+    end,
+
+    Request = #{
+        messages => [
+            #{
+                role => user,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"Hello">>
+                    }
+                ]
+            }
+        ]
+    },
+
+    ?assertEqual(
+        {error, {llm_failed, invalid_llm_response}},
+        hayata_tool_loop:run(LLM, Request, [], 3)
+    ).
+
 -spec request() -> map().
 request() ->
     #{

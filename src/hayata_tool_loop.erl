@@ -109,14 +109,31 @@ validate_response_shape(
         finish_reason := FinishReason
     } = Response
 ) when is_list(Content), is_atom(FinishReason) ->
-    case response_tool_calls(Response) of
-        {ok, _ToolCalls} ->
-            {ok, Response};
-        {error, _Reason} ->
+    case valid_finish_reason(FinishReason) of
+        true ->
+            case response_tool_calls(Response) of
+                {ok, _ToolCalls} ->
+                    {ok, Response};
+                {error, _Reason} ->
+                    {error, invalid_llm_response}
+            end;
+        false ->
             {error, invalid_llm_response}
     end;
 validate_response_shape(_Response) ->
     {error, invalid_llm_response}.
+
+-spec valid_finish_reason(atom()) -> boolean().
+valid_finish_reason(FinishReason) ->
+    lists:member(
+        FinishReason,
+        [
+            stop,
+            length,
+            tool_calls,
+            content_filter
+        ]
+    ).
 
 -spec response_tool_calls(map()) ->
     {ok, [map()]} | {error, invalid_tool_calls}.
