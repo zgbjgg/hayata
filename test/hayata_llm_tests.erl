@@ -567,6 +567,37 @@ generate_stream_rejects_invalid_event_data_from_non_cooperative_adapter_test() -
         ok
     end.
 
+generate_stream_rejects_invalid_event_type_from_non_cooperative_adapter_test() ->
+    Parent = self(),
+
+    Config = (config())#{
+        adapter => hayata_llm_invalid_type_stream_adapter
+    },
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => invalid_response,
+            reason => invalid_stream_event
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, Event} ->
+            error({unexpected_stream_event, Event})
+    after 0 ->
+        ok
+    end.
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
