@@ -652,7 +652,7 @@ http_stream_completed_response_test() ->
         ),
 
         receive
-            {http_request, _RequestLine, _Headers, Body} ->
+            {http_stream_request, _RequestLine, _Headers, Body} ->
                 Payload = json:decode(Body),
                 ?assertEqual(true, maps:get(<<"stream">>, Payload))
         after 5000 ->
@@ -754,7 +754,7 @@ start_http_stream_server(ResponseBody) ->
         try
             {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
             {RequestLine, Headers, Body} = read_http_request(Socket),
-            Parent ! {http_request, RequestLine, Headers, Body},
+            Parent ! {http_stream_request, RequestLine, Headers, Body},
 
             Response = <<
                 "HTTP/1.1 200 OK\r\n",
