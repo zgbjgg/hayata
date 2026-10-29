@@ -4226,6 +4226,67 @@ conversation_memory_does_not_preserve_transient_state_test() ->
         ?assertEqual(changed, maps:get(temporary, Result))
     end).
 
+tool_loop_is_available_to_node_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm_with_tool_loop => fun(Context) ->
+                ToolLoop = maps:get(hayata_tool_loop, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"Hello">>
+                            }
+                        ]
+                    }
+                ],
+                Request = #{messages => Messages},
+
+                case ToolLoop(Request, [], 3) of
+                    {ok, Result} ->
+                        #{tool_loop_result => Result};
+                    {error, Reason} ->
+                        #{tool_loop_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_adapter_mock,
+            model => <<"mock-model">>,
+            provider_config => #{response_mode => text}
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 ->
+                    {next, ask_llm_with_tool_loop, undefined};
+                1 ->
+                    {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{
+                tool_loop_result := #{
+                    response := #{
+                        finish_reason := stop
+                    },
+                    iterations := 1
+                }
+            },
+            Result
+        )
+    end).
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),

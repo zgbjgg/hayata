@@ -1920,7 +1920,16 @@ maybe_add_llm(Context, LLMConfig) when is_map(LLMConfig) ->
     LLM = fun(Request) ->
         hayata_llm:generate(LLMConfig, Request)
     end,
-    maps:put(hayata_llm, LLM, Context).
+    ToolLoop = fun(Request, Tools, MaxIterations) ->
+        hayata_tool_loop:run(
+            LLM,
+            Request,
+            Tools,
+            MaxIterations
+        )
+    end,
+    ContextWithLLM = maps:put(hayata_llm, LLM, Context),
+    maps:put(hayata_tool_loop, ToolLoop, ContextWithLLM).
 
 -spec active_node_execution(atom(), reference(), term()) -> boolean().
 active_node_execution(
