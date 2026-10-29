@@ -577,14 +577,13 @@ stream_coordinator_loop(
                     },
                     ok;
                 _ ->
-                    NextTerminal = Terminal orelse terminal_stream_event(EventCancellation),
                     stream_coordinator_loop(
                         Status,
                         NextActive,
                         NextCancellation,
                         CloseRequest,
                         GenerationId,
-                        NextTerminal
+                        Terminal
                     )
             end;
 
