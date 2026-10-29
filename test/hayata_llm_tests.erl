@@ -221,6 +221,29 @@ generate_rejects_tool_calls_with_stop_finish_reason_test() ->
         hayata_llm:generate(Config, valid_request())
     ).
 
+generate_stream_normalizes_adapter_exception_test() ->
+    Config = (config())#{
+        provider_config => #{
+            response_mode => provider_failure
+        }
+    },
+
+    Consumer = fun(_Event) ->
+        ok
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => provider_error,
+            reason => adapter_call_failed
+        }},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
