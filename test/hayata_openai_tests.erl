@@ -435,6 +435,104 @@ parse_sse_ignores_comments_test() ->
         Events
     ).
 
+normalize_sse_response_created_test() ->
+    State = #{},
+    Event = #{
+        event => <<"response.created">>,
+        data => <<"{\"response\":{\"id\":\"resp_1\"}}">>
+    },
+
+    {ok, [Normalized], NextState} =
+        hayata_openai:normalize_sse_event(Event, State),
+
+    ?assertEqual(message_started, maps:get(type, Normalized)),
+    ?assertEqual(<<"resp_1">>, maps:get(generation_id, Normalized)),
+    ?assertEqual(<<"resp_1">>, maps:get(generation_id, NextState)).
+
+normalize_sse_text_delta_test() ->
+    State = #{generation_id => <<"resp_1">>},
+    Event = #{
+        event => <<"response.output_text.delta">>,
+        data => <<
+            "{\"delta\":\"Hello\","
+            "\"output_index\":0,"
+            "\"content_index\":0}"
+        >>
+    },
+
+    {ok, [Normalized], _NextState} =
+        hayata_openai:normalize_sse_event(Event, State),
+
+    ?assertEqual(content_delta, maps:get(type, Normalized)),
+    ?assertEqual(<<"resp_1">>, maps:get(generation_id, Normalized)),
+    ?assertEqual(
+        #{
+            text => <<"Hello">>,
+            message_index => 0,
+            content_index => 0
+        },
+        maps:get(data, Normalized)
+    ).
+
+normalize_sse_completed_test() ->
+    State = #{generation_id => <<"resp_1">>},
+    Event = #{
+        event => <<"response.completed">>,
+        data => <<
+            "{\"response\":{"
+            "\"id\":\"resp_1\","
+            "\"status\":\"completed\","
+            "\"output\":[{"
+            "\"type\":\"message\","
+            "\"content\":[{"
+            "\"type\":\"output_text\","
+            "\"text\":\"Hello\""
+            "}]}]}}"
+        >>
+    },
+
+    {ok, NormalizedEvents, NextState} =
+        hayata_openai:normalize_sse_event(Event, State),
+
+    ?assertEqual(
+        [message_completed, generation_completed],
+        [maps:get(type, Item) || Item <- NormalizedEvents]
+    ),
+    ?assertEqual(true, maps:get(terminal, NextState)),
+    ?assertEqual(
+        <<"Hello">>,
+        maps:get(
+            text,
+            hd(maps:get(content, maps:get(message, maps:get(response, NextState))))
+        )
+    ).
+
+normalize_sse_failed_test() ->
+    State = #{generation_id => <<"resp_1">>},
+    Event = #{event => <<"response.failed">>, data => <<"{}">>},
+
+    {ok, [Normalized], NextState} =
+        hayata_openai:normalize_sse_event(Event, State),
+
+    ?assertEqual(generation_failed, maps:get(type, Normalized)),
+    ?assertEqual(true, maps:get(terminal, NextState)),
+    ?assertEqual(
+        #{code => provider_error},
+        maps:get(error, maps:get(data, Normalized))
+    ).
+
+normalize_sse_rejects_event_after_terminal_test() ->
+    State = #{generation_id => <<"resp_1">>, terminal => true},
+    Event = #{
+        event => <<"response.output_text.delta">>,
+        data => <<"{}">>
+    },
+
+    ?assertMatch(
+        {error, #{code := invalid_response}, _},
+        hayata_openai:normalize_sse_event(Event, State)
+    ).
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{

@@ -9,7 +9,10 @@
 ]).
 
 -ifdef(TEST).
--export([parse_sse_chunk/2]).
+-export([
+    parse_sse_chunk/2,
+    normalize_sse_event/2
+]).
 -endif.
 
 -define(DEFAULT_BASE_URL, <<"https://api.openai.com/v1">>).
@@ -386,3 +389,159 @@ dispatch_sse_event(State) ->
             ),
             {[#{event => Name, data => Payload}], NextState}
     end.
+
+-spec normalize_sse_event(map(), map()) ->
+    {ok, [hayata_llm_adapter:stream_event()], map()} |
+    {error, hayata_llm_adapter:normalized_error(), map()}.
+normalize_sse_event(_Event, #{terminal := true} = State) ->
+    {error, #{code => invalid_response, reason => event_after_terminal}, State};
+normalize_sse_event(
+    #{event := <<"response.created">>, data := Data},
+    State
+) ->
+    case decode_sse_data(Data) of
+        {ok, #{<<"response">> := #{<<"id">> := Id}}}
+                when is_binary(Id), byte_size(Id) > 0 ->
+            Event = stream_event(
+                message_started,
+                Id,
+                #{response_id => Id}
+            ),
+            {ok, [Event], State#{generation_id => Id}};
+        _ ->
+            {error, #{code => invalid_response}, State}
+    end;
+normalize_sse_event(
+    #{event := <<"response.output_text.delta">>, data := Data},
+    State
+) ->
+    case {
+        maps:find(generation_id, State),
+        decode_sse_data(Data)
+    } of
+        {{ok, GenerationId},
+         {ok, #{
+             <<"delta">> := Delta,
+             <<"output_index">> := OutputIndex,
+             <<"content_index">> := ContentIndex
+         }}}
+                when is_binary(Delta),
+                     is_integer(OutputIndex),
+                     OutputIndex >= 0,
+                     is_integer(ContentIndex),
+                     ContentIndex >= 0 ->
+            Event = stream_event(
+                content_delta,
+                GenerationId,
+                #{
+                    text => Delta,
+                    message_index => OutputIndex,
+                    content_index => ContentIndex
+                }
+            ),
+            {ok, [Event], State};
+        _ ->
+            {error, #{code => invalid_response}, State}
+    end;
+normalize_sse_event(
+    #{event := <<"response.completed">>, data := Data},
+    State
+) ->
+    case {
+        maps:find(generation_id, State),
+        decode_sse_data(Data)
+    } of
+        {{ok, GenerationId},
+         {ok, #{<<"response">> := Response}}}
+                when is_map(Response) ->
+            case maps:get(<<"id">>, Response, undefined) of
+                GenerationId ->
+                    case normalize_response(Response) of
+                        {ok, FinalResponse} ->
+                            Message = maps:get(message, FinalResponse),
+                            FinishReason = maps:get(
+                                finish_reason,
+                                FinalResponse
+                            ),
+                            Events = [
+                                stream_event(
+                                    message_completed,
+                                    GenerationId,
+                                    #{
+                                        message => Message,
+                                        finish_reason => FinishReason
+                                    }
+                                ),
+                                stream_event(
+                                    generation_completed,
+                                    GenerationId,
+                                    #{
+                                        finish_reason => FinishReason
+                                    }
+                                )
+                            ],
+                            {ok, Events, State#{
+                                terminal => true,
+                                response => FinalResponse
+                            }};
+                        {error, Error} ->
+                            {error, Error, State}
+                    end;
+                _OtherId ->
+                    {error, #{
+                        code => invalid_response,
+                        reason => inconsistent_generation_id
+                    }, State}
+            end;
+        _ ->
+            {error, #{code => invalid_response}, State}
+    end;
+normalize_sse_event(
+    #{event := <<"response.failed">>},
+    State
+) ->
+    normalize_sse_failure(State);
+normalize_sse_event(
+    #{event := <<"error">>},
+    State
+) ->
+    normalize_sse_failure(State);
+normalize_sse_event(_Event, State) ->
+    {ok, [], State}.
+
+-spec decode_sse_data(binary()) -> {ok, map()} | {error, term()}.
+decode_sse_data(Data) when is_binary(Data) ->
+    try json:decode(Data) of
+        Payload when is_map(Payload) ->
+            {ok, Payload};
+        _Other ->
+            {error, invalid_json_payload}
+    catch
+        _:_ ->
+            {error, invalid_json_payload}
+    end;
+decode_sse_data(_Data) ->
+    {error, invalid_json_payload}.
+
+-spec normalize_sse_failure(map()) ->
+    {ok, [hayata_llm_adapter:stream_event()], map()} |
+    {error, hayata_llm_adapter:normalized_error(), map()}.
+normalize_sse_failure(#{generation_id := GenerationId} = State) ->
+    Error = #{code => provider_error},
+    Event = stream_event(
+        generation_failed,
+        GenerationId,
+        #{error => Error}
+    ),
+    {ok, [Event], State#{terminal => true, error => Error}};
+normalize_sse_failure(State) ->
+    {error, #{code => invalid_response}, State}.
+
+-spec stream_event(atom(), term(), map()) ->
+    hayata_llm_adapter:stream_event().
+stream_event(Type, GenerationId, Data) ->
+    #{
+        type => Type,
+        generation_id => GenerationId,
+        data => Data
+    }.
