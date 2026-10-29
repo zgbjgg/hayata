@@ -288,10 +288,25 @@ validate_tool_calls_list(_ToolCalls) ->
 -spec forward_stream_event(
     term(),
     hayata_llm_adapter:consumer(),
-    ets:tid()
+    map()
 ) -> ok | {error, term()}.
 forward_stream_event(Event, Consumer, State) ->
-    case ets:lookup(State, cancellation) of
+    case atomics:get(maps:get(closed, State), 1) of
+        1 ->
+            {error, stream_closed};
+        0 ->
+            forward_open_stream_event(Event, Consumer, State)
+    end.
+
+-spec forward_open_stream_event(
+    term(),
+    hayata_llm_adapter:consumer(),
+    map()
+) -> ok | {error, term()}.
+forward_open_stream_event(Event, Consumer, State) ->
+    Cancellation = maps:get(cancellation, State),
+
+    case ets:lookup(Cancellation, cancellation) of
         [{cancellation, Reason}] ->
             {error, Reason};
         [] ->
@@ -339,17 +354,17 @@ call_stream_consumer(Event, Consumer, State) ->
         ok ->
             ok;
         {error, Reason} = Error ->
-            record_stream_cancellation(State, Reason),
+            record_stream_cancellation(maps:get(cancellation, State), Reason),
             Error;
         _Other ->
             record_stream_cancellation(
-                State,
+                maps:get(cancellation, State),
                 invalid_consumer_result
             ),
             {error, invalid_consumer_result}
     catch
         _Class:_Reason ->
-            record_stream_cancellation(State, consumer_failed),
+            record_stream_cancellation(maps:get(cancellation, State), consumer_failed),
             {error, consumer_failed}
     end.
 
@@ -386,7 +401,14 @@ normalize_error(_Reason) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 run_stream(Adapter, ProviderConfig, Request, Consumer) ->
-    State = ets:new(hayata_llm_stream_state, [set, public]),
+    State = #{
+        cancellation => ets:new(
+            hayata_llm_stream_state,
+            [set, public]
+        ),
+        closed => atomics:new(1, [])
+    },
+
     try
         StreamConsumer = fun(Event) ->
             forward_stream_event(Event, Consumer, State)
@@ -398,7 +420,7 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
             [Request, ProviderConfig, StreamConsumer]
         ),
 
-        case ets:lookup(State, cancellation) of
+        case ets:lookup(maps:get(cancellation, State), cancellation) of
             [{cancellation, Reason}] ->
                 {error, #{
                     code => cancelled,
@@ -408,7 +430,8 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
                 normalize_stream_result(AdapterResult)
         end
     after
-        ets:delete(State)
+        atomics:put(maps:get(closed, State), 1, 1),
+        ets:delete(maps:get(cancellation, State))
     end.
 
 -spec normalize_stream_result(term()) ->

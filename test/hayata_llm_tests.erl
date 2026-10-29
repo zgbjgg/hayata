@@ -383,6 +383,39 @@ generate_stream_stops_non_cooperative_adapter_test() ->
         ok
     end.
 
+generate_stream_rejects_late_callback_test() ->
+    Config = (config())#{
+        adapter => hayata_llm_late_callback_adapter
+    },
+
+    Consumer = fun(_Event) ->
+        self() ! unexpected_late_event,
+        ok
+    end,
+
+    ?assertMatch(
+        {ok, _Response},
+        hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    LateConsumer = get(hayata_late_stream_consumer),
+    erase(hayata_late_stream_consumer),
+
+    Event = #{
+        type => content_delta,
+        generation_id => make_ref(),
+        data => #{text => <<"Too late">>}
+    },
+
+    ?assertEqual(
+        {error, stream_closed},
+        LateConsumer(Event)
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
