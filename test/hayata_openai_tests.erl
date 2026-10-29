@@ -1944,6 +1944,396 @@ http_tool_loop_completes_multiple_tool_rounds_test() ->
         exit(ServerPid, kill)
     end.
 
+http_tool_loop_propagates_server_error_after_tool_execution_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ToolCallResponse =
+        <<"{\"id\":\"resp_tool_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    ServerError =
+        <<"{\"error\":{\"message\":\"Internal server error\"}}">>,
+
+    {Port, ServerPid, TestRef} =
+        start_http_server_sequence([
+            {200, ToolCallResponse},
+            {500, ServerError}
+        ]),
+
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{city => #{type => string}},
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! weather_tool_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(LLMRequest) ->
+        hayata_openai:generate(LLMRequest, Config)
+    end,
+
+    try
+        Result = hayata_tool_loop:run(
+            LLM,
+            valid_request(),
+            [Tool],
+            5
+        ),
+
+        ?assertEqual(
+            {error, {llm_failed, #{code => provider_error}}},
+            Result
+        ),
+
+        receive
+            weather_tool_executed ->
+                ok
+        after 1000 ->
+            error(weather_tool_was_not_executed)
+        end,
+
+        receive
+            {http_request, TestRef, _Line1, _Headers1, Body1} ->
+                Payload1 = json:decode(Body1),
+                ?assertEqual(
+                    1,
+                    length(maps:get(<<"input">>, Payload1))
+                )
+        after 5000 ->
+            error(first_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line2, _Headers2, Body2} ->
+                Payload2 = json:decode(Body2),
+                Input2 = maps:get(<<"input">>, Payload2),
+
+                ?assertEqual(3, length(Input2)),
+                ?assert(maps:is_key(<<"tools">>, Payload2))
+        after 5000 ->
+            error(second_http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_loop_propagates_rate_limit_after_tool_execution_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ToolCallResponse =
+        <<"{\"id\":\"resp_tool_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    RateLimitResponse =
+        <<"{\"error\":{\"message\":\"Rate limit exceeded\"}}">>,
+
+    {Port, ServerPid, TestRef} =
+        start_http_server_sequence([
+            {200, ToolCallResponse},
+            {429, RateLimitResponse}
+        ]),
+
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{city => #{type => string}},
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! weather_tool_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(LLMRequest) ->
+        hayata_openai:generate(LLMRequest, Config)
+    end,
+
+    try
+        Result = hayata_tool_loop:run(
+            LLM,
+            valid_request(),
+            [Tool],
+            5
+        ),
+
+        ?assertEqual(
+            {error, {llm_failed, #{code => rate_limited}}},
+            Result
+        ),
+
+        receive
+            weather_tool_executed ->
+                ok
+        after 1000 ->
+            error(weather_tool_was_not_executed)
+        end,
+
+        receive
+            {http_request, TestRef, _Line1, _Headers1, _Body1} ->
+                ok
+        after 5000 ->
+            error(first_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line2, _Headers2, _Body2} ->
+                ok
+        after 5000 ->
+            error(second_http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_loop_propagates_incomplete_response_after_tool_execution_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ToolCallResponse =
+        <<"{\"id\":\"resp_tool_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    IncompleteResponse =
+        <<"{\"status\":\"incomplete\","
+          "\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}">>,
+
+    {Port, ServerPid, TestRef} =
+        start_http_server_sequence([
+            ToolCallResponse,
+            IncompleteResponse
+        ]),
+
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{city => #{type => string}},
+            required => [<<"city">>]
+        },
+        handler => fun(_Arguments) ->
+            Parent ! weather_tool_executed,
+            {ok, #{temperature => 22}}
+        end
+    },
+
+    LLM = fun(LLMRequest) ->
+        hayata_openai:generate(LLMRequest, Config)
+    end,
+
+    try
+        ?assertEqual(
+            {error, {llm_failed, #{
+                code => provider_error,
+                reason => max_output_tokens
+            }}},
+            hayata_tool_loop:run(
+                LLM,
+                valid_request(),
+                [Tool],
+                5
+            )
+        ),
+
+        receive
+            weather_tool_executed ->
+                ok
+        after 1000 ->
+            error(weather_tool_was_not_executed)
+        end,
+
+        receive
+            {http_request, TestRef, _Line1, _Headers1, _Body1} ->
+                ok
+        after 5000 ->
+            error(first_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line2, _Headers2, _Body2} ->
+                ok
+        after 5000 ->
+            error(second_http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_response_preserves_text_and_tool_calls_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_mixed\","
+          "\"status\":\"completed\","
+          "\"output\":["
+          "{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"I will check the weather first.\""
+          "}]"
+          "},"
+          "{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}"
+          "]}">>,
+
+    {Port, ServerPid, TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        {ok, Response} = hayata_openai:generate(
+            valid_request(),
+            Config
+        ),
+
+        Message = maps:get(message, Response),
+
+        ?assertEqual(assistant, maps:get(role, Message)),
+        ?assertEqual(tool_calls, maps:get(finish_reason, Response)),
+
+        [TextBlock] = maps:get(content, Message),
+        ?assertEqual(
+            <<"I will check the weather first.">>,
+            maps:get(text, TextBlock)
+        ),
+
+        [ToolCall] = maps:get(tool_calls, Message),
+        ?assertEqual(<<"call_123">>, maps:get(id, ToolCall)),
+        ?assertEqual(<<"get_weather">>, maps:get(name, ToolCall)),
+        ?assertEqual(
+            #{<<"city">> => <<"Mexico City">>},
+            maps:get(arguments, ToolCall)
+        ),
+
+        receive
+            {http_request, TestRef, _Line, _Headers, _Body} ->
+                ok
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_call_with_invalid_json_arguments_is_rejected_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_invalid_arguments\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{invalid-json}\""
+          "}]}">>,
+
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_call_without_call_id_is_rejected_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_missing_call_id\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_tool_call_with_empty_call_id_is_rejected_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_empty_call_id\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    {Port, ServerPid, _TestRef} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+openai_tool_calling_capability_test() ->
+    {ok, Capabilities} = hayata_openai:capabilities(#{}),
+    Features = maps:get(features, Capabilities),
+
+    ?assertEqual(true, maps:get(tool_calling, Features)).
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
@@ -2231,10 +2621,30 @@ start_http_server_sequence(ResponseBodies) ->
     port(),
     pid(),
     reference(),
-    [binary()],
+    [binary() | {non_neg_integer(), binary()}],
     pos_integer()
 ) -> ok.
-serve_http_sequence(ListenSocket, Parent, TestRef, [ResponseBody | Rest], Index) ->
+serve_http_sequence(
+    ListenSocket,
+    Parent,
+    TestRef,
+    [ResponseBody | Rest],
+    Index
+) when is_binary(ResponseBody) ->
+    serve_http_sequence(
+        ListenSocket,
+        Parent,
+        TestRef,
+        [{200, ResponseBody} | Rest],
+        Index
+    );
+serve_http_sequence(
+    ListenSocket,
+    Parent,
+    TestRef,
+    [{Status, ResponseBody} | Rest],
+    Index
+) ->
     {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
 
     {RequestLine, Headers, Body} = read_http_request(Socket),
@@ -2248,7 +2658,11 @@ serve_http_sequence(ListenSocket, Parent, TestRef, [ResponseBody | Rest], Index)
     },
 
     Response = <<
-        "HTTP/1.1 200 OK\r\n",
+        "HTTP/1.1 ",
+        (integer_to_binary(Status))/binary,
+        " ",
+        (status_reason(Status))/binary,
+        "\r\n",
         "Content-Type: application/json\r\n",
         "Content-Length: ",
         (integer_to_binary(byte_size(ResponseBody)))/binary,

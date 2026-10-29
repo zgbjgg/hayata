@@ -26,7 +26,7 @@
 capabilities(_Config) ->
     {ok, #{
         features => #{
-            tool_calling => false,
+            tool_calling => true,
             structured_output => false,
             streaming => true,
             embeddings => false
