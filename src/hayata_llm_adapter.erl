@@ -9,7 +9,8 @@
     capabilities/0,
     normalized_error/0,
     stream_event/0,
-    consumer/0
+    consumer/0,
+    finish_reason/0
 ]).
 
 -type role() ::
@@ -41,7 +42,7 @@
 
 -type response() :: #{
     message := message(),
-    finish_reason := atom(),
+    finish_reason := finish_reason(),
     atom() => term()
 }.
 
@@ -82,6 +83,12 @@
 
 -type consumer() ::
     fun((stream_event()) -> ok | {error, term()}).
+
+-type finish_reason() ::
+    stop |
+    length |
+    tool_calls |
+    content_filter.
 
 -export_type([
     role/0,

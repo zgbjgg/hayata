@@ -138,6 +138,19 @@ response(invalid_message_content) ->
             content => <<"This should be a list.">>
         },
         finish_reason => stop
+    };
+response(invalid_finish_reason) ->
+    #{
+        message => #{
+            role => assistant,
+            content => [
+                #{
+                    type => text,
+                    text => <<"This response has an invalid finish reason.">>
+                }
+            ]
+        },
+        finish_reason => unknown_reason
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].

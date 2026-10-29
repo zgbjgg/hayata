@@ -213,18 +213,22 @@ safe_adapter_call(Adapter, Function, Arguments) ->
 -spec validate_response(term()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
-validate_response(#{message := Message,
-                    finish_reason := FinishReason} = Response)
-        when is_map(Message), is_atom(FinishReason) ->
+validate_response(
+    #{
+        message := Message,
+        finish_reason := FinishReason
+    } = Response
+) when is_map(Message), is_atom(FinishReason) ->
     case {
         maps:get(role, Message, undefined),
-        maps:get(content, Message, undefined)
+        maps:get(content, Message, undefined),
+        valid_finish_reason(FinishReason)
     } of
-        {assistant, Content} when is_list(Content) ->
+        {assistant, Content, true} when is_list(Content) ->
             case validate_tool_calls(Message) of
                 ok ->
                     {ok, Response};
-               {error, _Reason} ->
+                {error, _Reason} ->
                     {error, #{code => invalid_response}}
             end;
         _ ->
@@ -232,6 +236,18 @@ validate_response(#{message := Message,
     end;
 validate_response(_Response) ->
     {error, #{code => invalid_response}}.
+
+-spec valid_finish_reason(atom()) -> boolean().
+valid_finish_reason(FinishReason) ->
+    lists:member(
+        FinishReason,
+        [
+            stop,
+            length,
+            tool_calls,
+            content_filter
+        ]
+    ).
 
 -spec validate_tool_calls(map()) -> ok | {error, invalid_tool_calls}.
 validate_tool_calls(Message) ->
