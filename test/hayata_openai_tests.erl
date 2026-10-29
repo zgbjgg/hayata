@@ -178,7 +178,6 @@ http_rate_limit_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
-
 http_incomplete_response_is_normalized_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
@@ -838,6 +837,31 @@ http_stream_rate_limit_is_normalized_test() ->
 
         ?assertEqual(
             {error, #{code => rate_limited}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_authentication_error_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        401,
+        <<"{\"error\":{\"message\":\"Invalid API key\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => authentication}},
             Result
         )
     after
