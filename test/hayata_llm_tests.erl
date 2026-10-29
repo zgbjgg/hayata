@@ -304,6 +304,44 @@ generate_stream_rejects_invalid_final_response_test() ->
         )
     ).
 
+generate_stream_stops_after_consumer_rejection_test() ->
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Type = maps:get(type, Event),
+        Parent ! {stream_event, Type},
+        {error, subscriber_unavailable}
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                subscriber_unavailable
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ),
+
+    receive
+        {stream_event, message_started} ->
+            ok
+    after 1000 ->
+        error(missing_first_stream_event)
+    end,
+
+    receive
+        {stream_event, UnexpectedEvent} ->
+            error({event_received_after_rejection, UnexpectedEvent})
+    after 0 ->
+        ok
+    end.
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
