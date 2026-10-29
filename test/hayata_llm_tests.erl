@@ -785,7 +785,7 @@ llm_stream_rejects_inconsistent_generation_id_test() ->
 
 llm_stream_rejects_event_after_generation_failed_test() ->
     Parent = self(),
-    GenerationId = make_ref(),
+    GenerationId = <<"event-after-failure-test">>,
 
     Consumer = fun(Event) ->
         Parent ! {stream_event, Event},
