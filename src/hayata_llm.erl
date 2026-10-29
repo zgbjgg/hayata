@@ -401,17 +401,13 @@ normalize_error(_Reason) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 run_stream(Adapter, ProviderConfig, Request, Consumer) ->
-    State = #{
-        cancellation => ets:new(
-            hayata_llm_stream_state,
-            [set, public]
-        ),
-        closed => atomics:new(1, [])
-    },
+    Coordinator = spawn(fun() ->
+        stream_coordinator_loop(open, 0, undefined, undefined)
+    end),
 
     try
         StreamConsumer = fun(Event) ->
-            forward_stream_event(Event, Consumer, State)
+            coordinated_stream_event(Coordinator, Event, Consumer)
         end,
 
         AdapterResult = safe_adapter_call(
@@ -420,18 +416,19 @@ run_stream(Adapter, ProviderConfig, Request, Consumer) ->
             [Request, ProviderConfig, StreamConsumer]
         ),
 
-        case ets:lookup(maps:get(cancellation, State), cancellation) of
-            [{cancellation, Reason}] ->
+        Cancellation = close_stream_coordinator(Coordinator),
+
+        case Cancellation of
+            undefined ->
+                normalize_stream_result(AdapterResult);
+            Reason ->
                 {error, #{
                     code => cancelled,
                     reason => {consumer_rejected_event, Reason}
-                }};
-            [] ->
-                normalize_stream_result(AdapterResult)
+                }}
         end
     after
-        atomics:put(maps:get(closed, State), 1, 1),
-        ets:delete(maps:get(cancellation, State))
+        stop_stream_coordinator(Coordinator)
     end.
 
 -spec normalize_stream_result(term()) ->
@@ -443,3 +440,184 @@ normalize_stream_result({error, Reason}) ->
     normalize_error(Reason);
 normalize_stream_result(_Result) ->
     {error, #{code => invalid_response}}.
+
+-spec coordinated_stream_event(
+    pid(),
+    term(),
+    hayata_llm_adapter:consumer()
+) -> ok | {error, term()}.
+coordinated_stream_event(Coordinator, Event, Consumer) ->
+    Ref = make_ref(),
+    Monitor = erlang:monitor(process, Coordinator),
+    Coordinator ! {begin_event, self(), Ref},
+
+    Result = receive
+        {Ref, accepted} ->
+            {CallbackResult, Cancellation} =
+                deliver_stream_event(Event, Consumer),
+
+            Coordinator ! {
+                finish_event,
+                self(),
+                Ref,
+                CallbackResult,
+                Cancellation
+            },
+
+            receive
+                {Ref, acknowledged, CallbackResult} ->
+                    CallbackResult;
+                {'DOWN', Monitor, process, Coordinator, _Reason} ->
+                    {error, stream_closed}
+            end;
+        {Ref, {error, Reason}} ->
+            {error, Reason};
+        {'DOWN', Monitor, process, Coordinator, _Reason} ->
+            {error, stream_closed}
+    end,
+
+    erlang:demonitor(Monitor, [flush]),
+    Result.
+
+-spec deliver_stream_event(
+    term(),
+    hayata_llm_adapter:consumer()
+) -> {ok | {error, term()}, term()}.
+deliver_stream_event(
+    #{type := Type, generation_id := _GenerationId, data := Data} = Event,
+    Consumer
+) when is_atom(Type), is_map(Data) ->
+    case lists:member(
+        Type,
+        [
+            message_started,
+            content_delta,
+            tool_call_started,
+            tool_call_delta,
+            tool_call_completed,
+            message_completed,
+            generation_completed,
+            generation_failed
+        ]
+    ) of
+        true ->
+            deliver_to_consumer(Event, Consumer);
+        false ->
+            {{error, invalid_stream_event}, undefined}
+    end;
+deliver_stream_event(_Event, _Consumer) ->
+    {{error, invalid_stream_event}, undefined}.
+
+-spec deliver_to_consumer(
+    map(),
+    hayata_llm_adapter:consumer()
+) -> {ok | {error, term()}, term()}.
+deliver_to_consumer(Event, Consumer) ->
+    try Consumer(Event) of
+        ok ->
+            {ok, undefined};
+        {error, Reason} ->
+            {{error, Reason}, Reason};
+        _Other ->
+            {
+                {error, invalid_consumer_result},
+                invalid_consumer_result
+            }
+    catch
+        _Class:_Reason ->
+            {
+                {error, consumer_failed},
+                consumer_failed
+            }
+    end.
+
+-spec stream_coordinator_loop(
+    open | closing,
+    non_neg_integer(),
+    term(),
+    term()
+) -> ok.
+stream_coordinator_loop(Status, Active, Cancellation, CloseRequest) ->
+    receive
+        {begin_event, From, Ref} when Status =:= closing ->
+            From ! {Ref, {error, stream_closed}},
+            stream_coordinator_loop(
+                Status,
+                Active,
+                Cancellation,
+                CloseRequest
+            );
+
+        {begin_event, From, Ref} when Cancellation =/= undefined ->
+            From ! {Ref, {error, Cancellation}},
+            stream_coordinator_loop(
+                Status,
+                Active,
+                Cancellation,
+                CloseRequest
+           );
+
+        {begin_event, From, Ref} ->
+            From ! {Ref, accepted},
+            stream_coordinator_loop(
+                Status,
+                Active + 1,
+               Cancellation,
+               CloseRequest
+            );
+
+        {finish_event, From, Ref, Result, EventCancellation} ->
+            NextCancellation = case Cancellation of
+                undefined ->
+                    EventCancellation;
+                _Existing ->
+                    Cancellation
+            end,
+
+            From ! {Ref, acknowledged, Result},
+
+            NextActive = Active - 1,
+
+            case {Status, NextActive, CloseRequest} of
+                {closing, 0, {CloseFrom, CloseRef}} ->
+                    CloseFrom ! {CloseRef, NextCancellation},
+                    ok;
+                _ ->
+                    stream_coordinator_loop(
+                        Status,
+                        NextActive,
+                        NextCancellation,
+                        CloseRequest
+                    )
+            end;
+
+        {close, From, Ref} when Active =:= 0 ->
+            From ! {Ref, Cancellation},
+            ok;
+
+        {close, From, Ref} ->
+            stream_coordinator_loop(
+                closing,
+                Active,
+                Cancellation,
+                {From, Ref}
+            );
+
+        stop ->
+            ok
+    end.
+
+-spec close_stream_coordinator(pid()) -> term().
+close_stream_coordinator(Coordinator) ->
+    Ref = make_ref(),
+    Coordinator ! {close, self(), Ref},
+
+    receive
+        {Ref, Cancellation} ->
+            Cancellation
+    end.
+
+-spec stop_stream_coordinator(pid()) -> ok.
+stop_stream_coordinator(Coordinator) ->
+    Coordinator ! stop,
+    ok.

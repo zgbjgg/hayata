@@ -416,6 +416,64 @@ generate_stream_rejects_late_callback_test() ->
         LateConsumer(Event)
     ).
 
+generate_stream_waits_for_in_flight_callback_test() ->
+    Parent = self(),
+
+    spawn(fun() ->
+        AdapterOwner = self(),
+
+        Config = (config())#{
+            adapter => hayata_llm_concurrent_callback_adapter,
+            provider_config => #{
+                adapter_owner => AdapterOwner
+            }
+        },
+
+        Consumer = fun(_Event) ->
+            CallbackPid = self(),
+            Parent ! {consumer_started, CallbackPid},
+            AdapterOwner ! consumer_started,
+
+            receive
+                continue_callback ->
+                    ok
+            end
+        end,
+
+        Result = hayata_llm:generate_stream(
+            Config,
+            valid_request(),
+            Consumer
+        ),
+
+        Parent ! {stream_result, Result}
+    end),
+
+    CallbackPid = receive
+        {consumer_started, Pid} ->
+            Pid
+    after 1000 ->
+        error(consumer_did_not_start)
+    end,
+
+    receive
+        {stream_result, Result} ->
+            error({returned_before_callback_finished, Result})
+    after 50 ->
+        ok
+    end,
+
+    CallbackPid ! continue_callback,
+
+    receive
+        {stream_result, {ok, _Response}} ->
+            ok;
+        {stream_result, OtherResult} ->
+            error({unexpected_stream_result, OtherResult})
+    after 1000 ->
+        error(stream_did_not_finish)
+    end.
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
