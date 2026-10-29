@@ -331,19 +331,14 @@ validate_properties([{Name, Schema} | Rest], Seen) when is_map(Schema) ->
                 true ->
                     {error, {duplicate_property, NormalizedName}};
                 false ->
-                    case maps:get(type, Schema, undefined) of
-                        Type
-                                when Type =:= string;
-                                     Type =:= number;
-                                     Type =:= integer;
-                                     Type =:= boolean;
-                                     Type =:= object ->
+                    case validate_property_schema(Schema) of
+                        ok ->
                             validate_properties(
                                 Rest,
                                 [NormalizedName | Seen]
                             );
-                        _Other ->
-                            {error, invalid_property_schema}
+                        {error, Reason} ->
+                            {error, Reason}
                     end
             end;
         error ->
@@ -406,3 +401,25 @@ tool_definition(Tool) ->
         [name, description, parameters],
         Tool
     ).
+
+-spec validate_property_schema(map()) -> ok | {error, term()}.
+validate_property_schema(
+    #{type := object, properties := Properties} = Schema
+) when is_map(Properties) ->
+    case validate_properties(maps:to_list(Properties)) of
+        ok ->
+            validate_required_schema(
+                maps:get(required, Schema, []),
+                Properties
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+validate_property_schema(#{type := Type})
+        when Type =:= string;
+             Type =:= number;
+             Type =:= integer;
+             Type =:= boolean ->
+    ok;
+validate_property_schema(_Schema) ->
+    {error, invalid_property_schema}.
