@@ -244,6 +244,26 @@ generate_stream_normalizes_adapter_exception_test() ->
         )
     ).
 
+generate_stream_normalizes_consumer_exception_test() ->
+    Consumer = fun(_Event) ->
+        erlang:error(subscriber_crashed)
+    end,
+
+    ?assertEqual(
+        {error, #{
+            code => cancelled,
+            reason => {
+                consumer_rejected_event,
+                consumer_failed
+            }
+        }},
+        hayata_llm:generate_stream(
+            config(),
+            valid_request(),
+            Consumer
+        )
+    ).
+
 -spec config() -> hayata_llm:config().
 config() ->
     #{
