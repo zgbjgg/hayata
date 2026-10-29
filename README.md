@@ -150,6 +150,44 @@ Erlang code path, compile it, and call:
 hello_hayata:run().
 ```
 
+## Conversational memory
+
+Agents can optionally preserve conversation history between successive
+invocations. Enable this behavior with `conversation_memory => true`
+in the agent configuration:
+
+```erlang
+Config = #{
+    id => support_agent,
+    state => #{messages => []},
+    nodes => Nodes,
+    decision_policy => DecisionPolicy,
+    conversation_memory => true
+}.
+```
+
+When conversational memory is enabled, Hayata carries the `messages`
+entry from the agent's current state into the next invocation. This lets
+a node build each LLM request from the previous conversation instead of
+starting with an empty message history every time.
+
+For example, if a node appends each new user message to the `messages`
+list, successive invocations can build a history like
+`[FirstMessage, SecondMessage]`. The application is responsible for
+appending messages in the format expected by its LLM provider and for
+deciding which messages belong in the conversation.
+
+The option defaults to `false`. With the default behavior, every
+invocation starts from the configured initial state, so message history
+from a previous invocation is not retained. When the option is enabled,
+only the `messages` entry is carried over; other state fields are reset
+to their configured initial values at the beginning of each invocation.
+
+This feature preserves history in the lifetime of the running agent. It
+is not a vector or semantic memory system, and it does not by itself
+provide a durable conversation store or guarantee that conversation
+history survives an agent or VM restart.
+
 ## Invocation API
 
 Hayata supports asynchronous agent invocations with optional result
