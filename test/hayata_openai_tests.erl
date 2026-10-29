@@ -234,6 +234,25 @@ invalid_timeout_test() ->
         )
     ).
 
+http_authentication_error_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        401,
+        <<"{\"error\":{\"message\":\"Invalid API key\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => authentication}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{
@@ -385,4 +404,5 @@ valid_request() ->
 
 -spec status_reason(non_neg_integer()) -> binary().
 status_reason(200) -> <<"OK">>;
+status_reason(401) -> <<"Unauthorized">>;
 status_reason(429) -> <<"Too Many Requests">>.
