@@ -5,7 +5,8 @@
 
 -export([
     capabilities/1,
-    generate/2
+    generate/2,
+    generate_stream/3
 ]).
 
 -ifdef(TEST).
@@ -59,6 +60,39 @@ generate(Request, Config) ->
         {error, _Reason} ->
             {error, #{code => invalid_request}}
     end.
+
+-doc("Generates a normalized response and emits streaming events.").
+-spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+generate_stream(Request, Config, Consumer)
+        when is_function(Consumer, 1) ->
+    case validate_provider_config(Config) of
+        ok ->
+            case maps:find(api_key, Config) of
+                {ok, ApiKey}
+                        when is_binary(ApiKey),
+                             byte_size(ApiKey) > 0 ->
+                    case prepare_payload(Request) of
+                        {ok, Payload} ->
+                            StreamPayload = Payload#{<<"stream">> => true},
+                            send_stream_request(
+                                StreamPayload,
+                                ApiKey,
+                                Config,
+                                Consumer
+                            );
+                        {error, _Reason} ->
+                            {error, #{code => invalid_request}}
+                    end;
+                _ ->
+                    {error, #{code => authentication}}
+            end;
+        {error, _Reason} ->
+            {error, #{code => invalid_request}}
+    end;
+generate_stream(_Request, _Config, _Consumer) ->
+    {error, #{code => invalid_request}}.
 
 -spec validate_provider_config(map()) -> ok | {error, term()}.
 validate_provider_config(Config) when is_map(Config) ->
@@ -181,6 +215,228 @@ send_request(Payload, ApiKey, Config) ->
             {error, #{code => timeout}};
         {error, _Reason} ->
             {error, #{code => provider_error}}
+    end.
+
+-spec send_stream_request(map(), binary(), map(), hayata_llm_adapter:consumer()) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+send_stream_request(Payload, ApiKey, Config, Consumer) ->
+    BaseUrl = maps:get(base_url, Config, ?DEFAULT_BASE_URL),
+    Timeout = maps:get(timeout, Config, ?DEFAULT_TIMEOUT),
+    Url = binary_to_list(<<BaseUrl/binary, "/responses">>),
+    Headers = [
+        {"authorization", "Bearer " ++ binary_to_list(ApiKey)},
+        {"accept", "text/event-stream"}
+    ],
+    Body = iolist_to_binary(json:encode(Payload)),
+    HttpOptions = [
+        {timeout, Timeout},
+        {connect_timeout, Timeout},
+        {ssl, [
+            {verify, verify_peer},
+            {cacerts, public_key:cacerts_get()}
+        ]}
+    ],
+    Request = {Url, Headers, "application/json", Body},
+    RequestOptions = [
+        {sync, false},
+        {stream, {self, once}},
+        {body_format, binary}
+    ],
+    case httpc:request(
+        post,
+        Request,
+        HttpOptions,
+        RequestOptions
+    ) of
+        {ok, RequestId} ->
+            receive_stream_response(
+                RequestId,
+                Timeout,
+                Consumer,
+                #{buffer => <<>>, event => undefined, data => []},
+                #{}
+            );
+        {error, timeout} ->
+            {error, #{code => timeout}};
+        {error, _Reason} ->
+            {error, #{code => provider_error}}
+    end.
+
+-spec receive_stream_response(
+    term(),
+    pos_integer(),
+    hayata_llm_adapter:consumer(),
+    map(),
+    map()
+) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+receive_stream_response(RequestId, Timeout, Consumer, ParserState, EventState) ->
+    receive
+        {http, {RequestId, stream_start, Headers, HandlerPid}} ->
+            case stream_response_status(Headers) of
+                ok ->
+                    httpc:stream_next(HandlerPid),
+                    receive_stream_chunk(
+                        RequestId,
+                        HandlerPid,
+                        Timeout,
+                        Consumer,
+                        ParserState,
+                        EventState
+                    );
+                {error, Error} ->
+                    httpc:cancel_request(RequestId),
+                    {error, Error}
+            end;
+        {http, {RequestId, {{_Version, Status, _Reason}, _Headers, Body}}} ->
+            normalize_http_error(Status, Body);
+        {http, {RequestId, {error, timeout}}} ->
+            {error, #{code => timeout}};
+        {http, {RequestId, {error, _Reason}}} ->
+            {error, #{code => provider_error}}
+    after Timeout ->
+        httpc:cancel_request(RequestId),
+        {error, #{code => timeout}}
+    end.
+
+-spec receive_stream_chunk(
+    term(),
+    pid(),
+    pos_integer(),
+    hayata_llm_adapter:consumer(),
+    map(),
+    map()
+) ->
+    {ok, hayata_llm_adapter:response()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+receive_stream_chunk(
+    RequestId,
+    HandlerPid,
+    Timeout,
+    Consumer,
+    ParserState,
+    EventState
+) ->
+    receive
+        {http, {RequestId, stream, Chunk}} ->
+            case process_stream_chunk(
+                Chunk,
+                Consumer,
+                ParserState,
+                EventState
+            ) of
+                {ok, NextParserState, NextEventState} ->
+                    case maps:find(response, NextEventState) of
+                        {ok, Response} ->
+                            {ok, Response};
+                        error ->
+                            httpc:stream_next(HandlerPid),
+                            receive_stream_chunk(
+                                RequestId,
+                                HandlerPid,
+                                Timeout,
+                                Consumer,
+                                NextParserState,
+                                NextEventState
+                            )
+                    end;
+                {error, Error} ->
+                    httpc:cancel_request(RequestId),
+                    {error, Error}
+            end;
+        {http, {RequestId, stream_end, _Headers}} ->
+            case maps:find(response, EventState) of
+                {ok, Response} ->
+                    {ok, Response};
+                error ->
+                    {error, #{code => invalid_response}}
+            end;
+        {http, {RequestId, {error, timeout}}} ->
+            {error, #{code => timeout}};
+        {http, {RequestId, {error, _Reason}}} ->
+            {error, #{code => provider_error}}
+    after Timeout ->
+        httpc:cancel_request(RequestId),
+        {error, #{code => timeout}}
+    end.
+
+
+-spec process_stream_chunk(binary(), hayata_llm_adapter:consumer(), map(), map()) ->
+    {ok, map(), map()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+process_stream_chunk(Chunk, Consumer, ParserState, EventState) ->
+    {Events, NextParserState} =
+        parse_sse_chunk(Chunk, ParserState),
+
+    case process_stream_events(Events, Consumer, EventState) of
+        {ok, NextEventState} ->
+            case maps:find(error, NextEventState) of
+                {ok, Error} ->
+                    {error, Error};
+                error ->
+                    {ok, NextParserState, NextEventState}
+            end;
+        {error, Error} ->
+            {error, Error}
+    end.
+
+-spec process_stream_events([map()], hayata_llm_adapter:consumer(), map()) ->
+    {ok, map()} |
+    {error, hayata_llm_adapter:normalized_error()}.
+process_stream_events([], _Consumer, EventState) ->
+    {ok, EventState};
+process_stream_events([Event | Rest], Consumer, EventState) ->
+    case normalize_sse_event(Event, EventState) of
+        {ok, NormalizedEvents, NextEventState} ->
+            case deliver_stream_events(NormalizedEvents, Consumer) of
+                ok ->
+                    process_stream_events(
+                        Rest,
+                        Consumer,
+                        NextEventState
+                    );
+                {error, Error} ->
+                    {error, Error}
+            end;
+        {error, Error, _NextEventState} ->
+            {error, Error}
+    end.
+
+-spec deliver_stream_events([map()], hayata_llm_adapter:consumer()) ->
+    ok | {error, hayata_llm_adapter:normalized_error()}.
+deliver_stream_events([], _Consumer) ->
+    ok;
+deliver_stream_events([Event | Rest], Consumer) ->
+    try Consumer(Event) of
+        ok ->
+            deliver_stream_events(Rest, Consumer);
+        {error, Reason} ->
+            {error, #{code => cancelled, reason => Reason}};
+        _Other ->
+            {error, #{code => invalid_response}}
+    catch
+        _:_ ->
+            {error, #{code => cancelled, reason => consumer_failed}}
+    end.
+
+-spec stream_response_status(list()) ->
+    ok | {error, hayata_llm_adapter:normalized_error()}.
+stream_response_status(Headers) ->
+    case lists:keyfind("content-type", 1, Headers) of
+        {_, ContentType} ->
+            case string:find(
+                string:lowercase(ContentType),
+                "text/event-stream"
+            ) of
+                nomatch ->
+                    {error, #{code => invalid_response}};
+                _ ->
+                    ok
+            end;
+        false ->
+            {error, #{code => invalid_response}}
     end.
 
 -spec decode_response(binary()) ->

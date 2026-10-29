@@ -533,6 +533,61 @@ normalize_sse_rejects_event_after_terminal_test() ->
         hayata_openai:normalize_sse_event(Event, State)
     ).
 
+http_stream_failure_notifies_consumer_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_failed\"}}\n\n",
+        "event: response.failed\n",
+        "data: {\"response\":{\"id\":\"resp_failed\","
+        "\"status\":\"failed\"}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{code => provider_error}},
+            Result
+        ),
+
+        receive
+            {stream_event, Event} ->
+                ?assertEqual(
+                    message_started,
+                    maps:get(type, Event)
+                )
+        after 5000 ->
+            error(message_started_event_not_received)
+        end,
+
+        receive
+            {stream_event, Event2} ->
+                ?assertEqual(
+                    generation_failed,
+                    maps:get(type, Event2)
+                )
+        after 5000 ->
+            error(generation_failed_event_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{
@@ -588,6 +643,52 @@ start_http_server(Status, ResponseBody) ->
         catch
             Class:Reason:Stacktrace ->
                 Parent ! {http_server_error, Class, Reason, Stacktrace},
+                erlang:raise(Class, Reason, Stacktrace)
+        end
+    end),
+
+    {Port, ServerPid}.
+
+-spec start_http_stream_server(binary()) ->
+    {inet:port_number(), pid()}.
+start_http_stream_server(ResponseBody) ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [
+        binary,
+        {packet, raw},
+        {active, false},
+        {reuseaddr, true}
+    ]),
+
+    {ok, {_Address, Port}} = inet:sockname(ListenSocket),
+    Parent = self(),
+
+    ServerPid = spawn(fun() ->
+        try
+            {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+            {RequestLine, Headers, Body} = read_http_request(Socket),
+            Parent ! {http_request, RequestLine, Headers, Body},
+
+            Response = <<
+                "HTTP/1.1 200 OK\r\n",
+                "Content-Type: text/event-stream\r\n",
+                "Content-Length: ",
+                (integer_to_binary(byte_size(ResponseBody)))/binary,
+                "\r\n",
+                "Connection: close\r\n\r\n",
+                ResponseBody/binary
+            >>,
+
+            ok = gen_tcp:send(Socket, Response),
+            gen_tcp:close(Socket),
+            gen_tcp:close(ListenSocket)
+        catch
+            Class:Reason:Stacktrace ->
+                Parent ! {
+                    http_server_error,
+                    Class,
+                    Reason,
+                    Stacktrace
+                },
                 erlang:raise(Class, Reason, Stacktrace)
         end
     end),
