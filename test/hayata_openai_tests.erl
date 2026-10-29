@@ -329,6 +329,44 @@ http_provider_error_is_normalized_test() ->
         exit(ServerPid, kill)
     end.
 
+http_forbidden_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        403,
+        <<"{\"error\":{\"message\":\"Forbidden\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => authentication}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_gateway_timeout_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        504,
+        <<"{\"error\":{\"message\":\"Gateway timeout\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => timeout}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{
@@ -483,4 +521,6 @@ status_reason(200) -> <<"OK">>;
 status_reason(400) -> <<"Bad Request">>;
 status_reason(401) -> <<"Unauthorized">>;
 status_reason(429) -> <<"Too Many Requests">>;
+status_reason(403) -> <<"Forbidden">>;
+status_reason(504) -> <<"Gateway Timeout">>;
 status_reason(500) -> <<"Internal Server Error">>.
