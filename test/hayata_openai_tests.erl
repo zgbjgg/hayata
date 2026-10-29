@@ -552,9 +552,10 @@ http_stream_failure_notifies_consumer_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -617,9 +618,10 @@ http_stream_completed_response_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -644,7 +646,7 @@ http_stream_completed_response_test() ->
             Result
         ),
 
-        EventTypes = receive_stream_event_types(4, []),
+        EventTypes = receive_stream_event_types(TestRef, 4, []),
 
         ?assertEqual(
             [
@@ -681,9 +683,10 @@ http_stream_consumer_cancellation_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         {error, consumer_stopped}
     end,
 
@@ -753,9 +756,10 @@ http_stream_fragmented_event_test() ->
     ]),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -787,7 +791,7 @@ http_stream_fragmented_event_test() ->
                 message_completed,
                 generation_completed
             ],
-            receive_stream_event_types(4, [])
+            receive_stream_event_types(TestRef, 4, [])
         )
     after
         exit(ServerPid, kill)
@@ -882,9 +886,10 @@ http_stream_ended_without_completion_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -900,7 +905,7 @@ http_stream_ended_without_completion_test() ->
             Result
         ),
 
-        EventTypes = receive_stream_event_types(2, []),
+        EventTypes = receive_stream_event_types(TestRef, 2, []),
 
         ?assertEqual(
             [message_started, content_delta],
@@ -924,9 +929,10 @@ http_stream_rejects_malformed_text_delta_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -983,9 +989,10 @@ http_stream_rejects_inconsistent_generation_id_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -1178,9 +1185,10 @@ http_stream_rejects_invalid_delta_json_test() ->
     {Port, ServerPid} = start_http_stream_server(ResponseBody),
     Config = http_test_config(Port),
     Parent = self(),
+    TestRef = make_ref(),
 
     Consumer = fun(Event) ->
-        Parent ! {stream_event, Event},
+        Parent ! {stream_event, TestRef, Event},
         ok
     end,
 
@@ -1236,18 +1244,24 @@ http_stream_timeout_test() ->
     after
         exit(ServerPid, kill)
     end.
--spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
-receive_stream_event_types(0, Acc) ->
+
+-spec receive_stream_event_types(
+    reference(),
+    non_neg_integer(),
+    [atom()]
+) -> [atom()].
+receive_stream_event_types(_TestRef, 0, Acc) ->
     lists:reverse(Acc);
-receive_stream_event_types(Count, Acc) ->
+receive_stream_event_types(TestRef, Count, Acc) ->
     receive
-        {stream_event, Event} ->
+        {stream_event, TestRef, Event} ->
             receive_stream_event_types(
+                TestRef,
                 Count - 1,
                 [maps:get(type, Event) | Acc]
             )
     after 5000 ->
-        error(stream_event_not_received)
+        error({stream_event_not_received, Count})
     end.
 
 -spec http_test_config(inet:port_number()) -> map().
