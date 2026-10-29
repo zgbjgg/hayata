@@ -457,10 +457,15 @@ decode_response(Body) ->
 -spec normalize_response(map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
-normalize_response(#{<<"status">> := <<"completed">>,
-                     <<"output">> := Output} = Response) ->
-    case extract_text(Output, []) of
-        {ok, Text} when byte_size(Text) > 0 ->
+normalize_response(
+    #{<<"status">> := <<"completed">>,
+      <<"output">> := Output} = Response
+) when is_list(Output) ->
+    case {
+        extract_text(Output, []),
+        extract_tool_calls(Output, [])
+    } of
+        {{ok, Text}, {ok, []}} when byte_size(Text) > 0 ->
             {ok, #{
                 message => #{
                     role => assistant,
@@ -469,13 +474,27 @@ normalize_response(#{<<"status">> := <<"completed">>,
                 finish_reason => stop,
                 id => maps:get(<<"id">>, Response, undefined)
             }};
-        {ok, _EmptyText} ->
-            {error, #{code => invalid_response}};
-        {error, _Reason} ->
+        {{ok, Text}, {ok, ToolCalls}} when ToolCalls =/= [] ->
+            Content = case Text of
+                <<>> -> [];
+                _ -> [#{type => text, text => Text}]
+            end,
+            {ok, #{
+                message => #{
+                    role => assistant,
+                    content => Content,
+                    tool_calls => ToolCalls
+                },
+                finish_reason => tool_calls,
+                id => maps:get(<<"id">>, Response, undefined)
+            }};
+        _ ->
             {error, #{code => invalid_response}}
     end;
-normalize_response(#{<<"status">> := <<"incomplete">>,
-                     <<"incomplete_details">> := Details}) ->
+normalize_response(
+    #{<<"status">> := <<"incomplete">>,
+      <<"incomplete_details">> := Details}
+) ->
     normalize_incomplete(Details);
 normalize_response(_Response) ->
     {error, #{code => invalid_response}}.
@@ -508,6 +527,49 @@ extract_content_text([
     extract_content_text(Rest, [Text | Acc]);
 extract_content_text([_Other | Rest], Acc) ->
     extract_content_text(Rest, Acc).
+
+-spec extract_tool_calls(list(), list()) ->
+    {ok, [hayata_llm_adapter:tool_call()]} | {error, term()}.
+extract_tool_calls([], Acc) ->
+    {ok, lists:reverse(Acc)};
+extract_tool_calls([
+    #{<<"type">> := <<"function_call">>,
+      <<"call_id">> := Id,
+      <<"name">> := Name,
+      <<"arguments">> := Arguments} | Rest
+], Acc)
+        when is_binary(Id), byte_size(Id) > 0,
+             is_binary(Name), byte_size(Name) > 0,
+             is_binary(Arguments) ->
+    case decode_tool_arguments(Arguments) of
+        {ok, ParsedArguments} ->
+            ToolCall = #{
+                id => Id,
+                name => Name,
+                arguments => ParsedArguments
+            },
+            extract_tool_calls(Rest, [ToolCall | Acc]);
+        {error, Reason} ->
+            {error, Reason}
+    end;
+extract_tool_calls([
+    #{<<"type">> := <<"function_call">>} | _Rest
+], _Acc) ->
+    {error, invalid_tool_call};
+extract_tool_calls([_Other | Rest], Acc) ->
+    extract_tool_calls(Rest, Acc).
+
+-spec decode_tool_arguments(binary()) -> {ok, map()} | {error, term()}.
+decode_tool_arguments(Arguments) ->
+    try json:decode(Arguments) of
+        ParsedArguments when is_map(ParsedArguments) ->
+            {ok, ParsedArguments};
+        _Other ->
+            {error, invalid_tool_arguments}
+    catch
+        _:_ ->
+            {error, invalid_tool_arguments}
+    end.
 
 -spec normalize_incomplete(map()) ->
     {error, hayata_llm_adapter:normalized_error()}.

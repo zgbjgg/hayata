@@ -1245,6 +1245,115 @@ http_stream_timeout_test() ->
         exit(ServerPid, kill)
     end.
 
+http_function_call_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "{\"id\":\"resp_tools\",",
+        "\"status\":\"completed\",",
+        "\"output\":[{",
+        "\"type\":\"function_call\",",
+        "\"call_id\":\"call_123\",",
+        "\"name\":\"get_weather\",",
+        "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\"",
+        "}]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {ok, #{
+                message => #{
+                    role => assistant,
+                    content => [],
+                    tool_calls => [
+                        #{
+                            id => <<"call_123">>,
+                            name => <<"get_weather">>,
+                            arguments => #{
+                                <<"city">> => <<"Mexico City">>
+                            }
+                        }
+                    ]
+                },
+                finish_reason => tool_calls,
+                id => <<"resp_tools">>
+            }},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_multiple_function_calls_preserve_order_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "{\"id\":\"resp_multiple_tools\",",
+        "\"status\":\"completed\",",
+        "\"output\":[",
+        "{",
+        "\"type\":\"function_call\",",
+        "\"call_id\":\"call_first\",",
+        "\"name\":\"get_weather\",",
+        "\"arguments\":\"{\\\"city\\\":\\\"Puebla\\\"}\"",
+        "},",
+        "{",
+        "\"type\":\"function_call\",",
+        "\"call_id\":\"call_second\",",
+        "\"name\":\"get_forecast\",",
+        "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\"",
+        "}",
+        "]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate(valid_request(), Config),
+
+        ?assertMatch(
+            {ok, #{
+                finish_reason := tool_calls,
+                message := #{
+                    tool_calls := [
+                        #{id := <<"call_first">>},
+                        #{id := <<"call_second">>}
+                    ]
+                }
+            }},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_function_call_with_invalid_arguments_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "{\"id\":\"resp_invalid_tools\",",
+        "\"status\":\"completed\",",
+        "\"output\":[{",
+        "\"type\":\"function_call\",",
+        "\"call_id\":\"call_invalid\",",
+        "\"name\":\"get_weather\",",
+        "\"arguments\":\"not-json\"",
+        "}]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_response}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
