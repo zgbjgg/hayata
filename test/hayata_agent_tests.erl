@@ -4819,6 +4819,78 @@ llm_stream_rejects_stale_execution_event_test() ->
         end
     end).
 
+llm_stream_rejects_invalid_adapter_event_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            ask_llm => fun(Context) ->
+                LLMStream = maps:get(hayata_llm_stream, Context),
+                Messages = [
+                    #{
+                        role => user,
+                        content => [
+                            #{
+                                type => text,
+                                text => <<"Hello">>
+                            }
+                        ]
+                    }
+                ],
+                case LLMStream(#{messages => Messages}) of
+                    {ok, Response} ->
+                        #{llm_response => Response};
+                    {error, Reason} ->
+                        #{llm_error => Reason}
+                end
+            end
+        },
+        llm => #{
+            adapter => hayata_llm_invalid_type_stream_adapter,
+            model => <<"mock-model">>
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, ask_llm, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, InvocationId} = hayata_agent:run(
+            Agent,
+            start,
+            #{subscriber => self(), stream => true}
+        ),
+
+        Events = collect_stream_events(InvocationId, []),
+
+        LLMEvents = [
+            Event
+            || Event <- Events,
+               lists:prefix(
+                   "llm_",
+                   atom_to_list(maps:get(type, Event))
+               )
+        ],
+
+        ?assertEqual([], LLMEvents),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{
+                llm_error := #{
+                    code := invalid_response,
+                    reason := invalid_stream_event
+                }
+            },
+            Result
+        )
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),
