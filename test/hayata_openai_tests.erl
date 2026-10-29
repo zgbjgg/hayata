@@ -794,7 +794,6 @@ http_stream_fragmented_event_test() ->
         exit(ServerPid, kill)
     end.
 
-
 http_stream_rejects_invalid_content_type_test() ->
     {ok, _} = application:ensure_all_started(inets),
 
@@ -814,6 +813,31 @@ http_stream_rejects_invalid_content_type_test() ->
 
         ?assertEqual(
             {error, #{code => invalid_response}},
+            Result
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_stream_rate_limit_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        429,
+        <<"{\"error\":{\"message\":\"Rate limit exceeded\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            fun(_Event) -> ok end
+        ),
+
+        ?assertEqual(
+            {error, #{code => rate_limited}},
             Result
         )
     after
