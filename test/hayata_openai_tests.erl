@@ -2334,6 +2334,40 @@ openai_tool_calling_capability_test() ->
 
     ?assertEqual(true, maps:get(tool_calling, Features)).
 
+openai_capabilities_contract_test() ->
+    {ok, Capabilities} = hayata_openai:capabilities(#{}),
+
+    Features = maps:get(features, Capabilities),
+
+    ?assertEqual(
+        #{
+            tool_calling => true,
+            structured_output => false,
+            streaming => true,
+            embeddings => false
+        },
+        Features
+    ),
+
+    ?assertEqual(
+        #{
+            input => [text],
+            output => [text]
+        },
+        maps:get(modalities, Capabilities)
+    ).
+
+openai_capabilities_are_independent_of_config_test() ->
+    {ok, DefaultCapabilities} = hayata_openai:capabilities(#{}),
+
+    {ok, CustomCapabilities} = hayata_openai:capabilities(#{
+        api_key => <<"test-key">>,
+        base_url => <<"https://example.com/v1">>,
+        timeout => 5000
+    }),
+
+    ?assertEqual(DefaultCapabilities, CustomCapabilities).
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
