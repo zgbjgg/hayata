@@ -130,6 +130,14 @@ response(invalid_message_role) ->
             ]
         },
         finish_reason => stop
+    };
+response(invalid_message_content) ->
+    #{
+        message => #{
+            role => assistant,
+            content => <<"This should be a list.">>
+        },
+        finish_reason => stop
     }.
 
 -spec stream_events() -> [hayata_llm_adapter:stream_event()].
