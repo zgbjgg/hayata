@@ -3,6 +3,12 @@
 
 -include_lib("eunit/include/eunit.hrl").
 
+openai_streaming_capability_test() ->
+    {ok, Capabilities} = hayata_openai:capabilities(#{}),
+    Features = maps:get(features, Capabilities),
+
+    ?assertEqual(true, maps:get(streaming, Features)).
+
 missing_api_key_test() ->
     ?assertEqual(
         {error, #{code => authentication}},

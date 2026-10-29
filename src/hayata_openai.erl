@@ -28,7 +28,7 @@ capabilities(_Config) ->
         features => #{
             tool_calling => false,
             structured_output => false,
-            streaming => false,
+            streaming => true,
             embeddings => false
         },
         modalities => #{
