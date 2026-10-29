@@ -291,6 +291,44 @@ http_completed_response_with_unsupported_output_is_invalid_test() ->
         exit(ServerPid, kill)
     end.
 
+http_invalid_request_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        400,
+        <<"{\"error\":{\"message\":\"Invalid request\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => invalid_request}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_provider_error_is_normalized_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    {Port, ServerPid} = start_http_server(
+        500,
+        <<"{\"error\":{\"message\":\"Internal server error\"}}">>
+    ),
+
+    Config = http_test_config(Port),
+
+    try
+        ?assertEqual(
+            {error, #{code => provider_error}},
+            hayata_openai:generate(valid_request(), Config)
+        )
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec http_test_config(inet:port_number()) -> map().
 http_test_config(Port) ->
     #{
@@ -442,5 +480,7 @@ valid_request() ->
 
 -spec status_reason(non_neg_integer()) -> binary().
 status_reason(200) -> <<"OK">>;
+status_reason(400) -> <<"Bad Request">>;
 status_reason(401) -> <<"Unauthorized">>;
-status_reason(429) -> <<"Too Many Requests">>.
+status_reason(429) -> <<"Too Many Requests">>;
+status_reason(500) -> <<"Internal Server Error">>.
