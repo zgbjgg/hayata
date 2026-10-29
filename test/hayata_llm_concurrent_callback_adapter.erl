@@ -26,7 +26,7 @@ generate(_Request, _Config) ->
     {ok, response()}.
 
 generate_stream(_Request, Config, Consumer) ->
-    AdapterOwner = maps:get(adapter_owner, Config),
+    _AdapterOwner = maps:get(adapter_owner, Config),
 
     spawn(fun() ->
         Consumer(#{

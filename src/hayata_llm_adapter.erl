@@ -75,6 +75,12 @@
     generation_completed |
     generation_failed.
 
+%% A normalized event emitted during a single generation.
+%%
+%% All events emitted by the same generate_stream/3 invocation
+%% must use the same generation_id. Changing the identifier
+%% causes Hayata to reject the stream with:
+%% #{code => invalid_response, reason => inconsistent_generation_id}.
 -type stream_event() :: #{
     type := stream_event_type(),
     generation_id := term(),
@@ -107,7 +113,18 @@
     {error, NormalizedError :: normalized_error()}.
 
 %% Generates a normalized response and emits intermediate events.
-%% The consumer must return ok to continue or {error, Reason} to stop.
+%%
+%% Every event emitted during this invocation must use the same
+%% generation_id. Events must comply with the stream_event/0
+%% contract.
+%%
+%% The consumer must return ok to continue or {error, Reason}
+%% to stop. The adapter must stop emitting events when the
+%% consumer returns an error.
+%%
+%% If generation_id changes during the stream, Hayata rejects
+%% the stream with invalid_response and reason
+%% inconsistent_generation_id.
 -callback generate_stream(
     Request :: request(),
     Config :: map(),
