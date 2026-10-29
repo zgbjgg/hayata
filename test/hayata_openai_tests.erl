@@ -1580,6 +1580,141 @@ http_tool_history_is_converted_to_responses_input_test() ->
         exit(ServerPid, kill)
     end.
 
+http_tool_loop_completes_end_to_end_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ToolCallResponse =
+        <<"{\"id\":\"resp_tool_call\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"function_call\","
+          "\"call_id\":\"call_123\","
+          "\"name\":\"get_weather\","
+          "\"arguments\":\"{\\\"city\\\":\\\"Mexico City\\\"}\""
+          "}]}">>,
+
+    FinalResponse =
+        <<"{\"id\":\"resp_final\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"The weather is sunny.\""
+          "}]}]}">>,
+
+    {Port, ServerPid, TestRef} =
+        start_http_server_sequence([
+            ToolCallResponse,
+            FinalResponse
+        ]),
+
+    Config = http_test_config(Port),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Gets the current weather for a city.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [<<"city">>]
+        },
+        handler => fun(Arguments) ->
+            case maps:get(<<"city">>, Arguments) of
+                <<"Mexico City">> ->
+                    {ok, #{temperature => 22, conditions => <<"sunny">>}};
+                _ ->
+                    {error, unknown_city}
+            end
+        end
+    },
+
+    Request = #{
+        model => <<"mock-model">>,
+        messages => [
+            #{
+                role => user,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"What is the weather in Mexico City?">>
+                    }
+                ]
+            }
+        ]
+    },
+
+    LLM = fun(LLMRequest) ->
+        hayata_openai:generate(LLMRequest, Config)
+    end,
+
+    try
+        {ok, Result} = hayata_tool_loop:run(
+            LLM,
+            Request,
+            [Tool],
+            5
+        ),
+
+        ?assertEqual(2, maps:get(iterations, Result)),
+        ?assertEqual(
+            <<"The weather is sunny.">>,
+            response_text(maps:get(response, Result))
+        ),
+
+        receive
+            {http_request, TestRef, _Line1, _Headers1, Body1} ->
+                Payload1 = json:decode(Body1),
+                Input1 = maps:get(<<"input">>, Payload1),
+
+                ?assertEqual(1, length(Input1)),
+                ?assert(maps:is_key(<<"tools">>, Payload1))
+        after 5000 ->
+            error(first_http_request_not_received)
+        end,
+
+        receive
+            {http_request, TestRef, _Line2, _Headers2, Body2} ->
+                Payload2 = json:decode(Body2),
+                Input2 = maps:get(<<"input">>, Payload2),
+
+                ?assertEqual(3, length(Input2)),
+
+                [_UserInput, FunctionCall, FunctionOutput] = Input2,
+
+                ?assertEqual(
+                    <<"function_call">>,
+                    maps:get(<<"type">>, FunctionCall)
+                ),
+                ?assertEqual(
+                    <<"call_123">>,
+                    maps:get(<<"call_id">>, FunctionCall)
+                ),
+
+                ?assertEqual(
+                    <<"function_call_output">>,
+                    maps:get(<<"type">>, FunctionOutput)
+                ),
+                ?assertEqual(
+                    <<"call_123">>,
+                    maps:get(<<"call_id">>, FunctionOutput)
+                ),
+
+                Output = json:decode(
+                    maps:get(<<"output">>, FunctionOutput)
+                ),
+
+                ?assertEqual(22, maps:get(<<"temperature">>, Output)),
+                ?assertEqual(<<"sunny">>, maps:get(<<"conditions">>, Output))
+        after 5000 ->
+            error(second_http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),
@@ -1824,6 +1959,88 @@ start_http_stream_server_stalling() ->
 
     {Port, ServerPid}.
 
+-spec start_http_server_sequence([binary()]) ->
+    {inet:port_number(), pid(), reference()}.
+start_http_server_sequence(ResponseBodies) ->
+    {ok, ListenSocket} = gen_tcp:listen(0, [
+        binary,
+        {packet, raw},
+        {active, false},
+        {reuseaddr, true}
+    ]),
+
+    {ok, {_Address, Port}} = inet:sockname(ListenSocket),
+
+    Parent = self(),
+    TestRef = make_ref(),
+
+    ServerPid = spawn(fun() ->
+        try
+            serve_http_sequence(
+                ListenSocket,
+                Parent,
+                TestRef,
+                ResponseBodies,
+                1
+            )
+        catch
+            Class:Reason:Stacktrace ->
+                Parent ! {
+                    http_server_error,
+                    TestRef,
+                    Class,
+                    Reason,
+                    Stacktrace
+                },
+                erlang:raise(Class, Reason, Stacktrace)
+        end
+    end),
+
+    {Port, ServerPid, TestRef}.
+
+-spec serve_http_sequence(
+    port(),
+    pid(),
+    reference(),
+    [binary()],
+    pos_integer()
+) -> ok.
+serve_http_sequence(ListenSocket, Parent, TestRef, [ResponseBody | Rest], Index) ->
+    {ok, Socket} = gen_tcp:accept(ListenSocket, 5000),
+
+    {RequestLine, Headers, Body} = read_http_request(Socket),
+
+    Parent ! {
+        http_request,
+        TestRef,
+        RequestLine,
+        Headers,
+        Body
+    },
+
+    Response = <<
+        "HTTP/1.1 200 OK\r\n",
+        "Content-Type: application/json\r\n",
+        "Content-Length: ",
+        (integer_to_binary(byte_size(ResponseBody)))/binary,
+        "\r\nConnection: close\r\n\r\n",
+        ResponseBody/binary
+    >>,
+
+    ok = gen_tcp:send(Socket, Response),
+    gen_tcp:close(Socket),
+
+    serve_http_sequence(
+        ListenSocket,
+        Parent,
+        TestRef,
+        Rest,
+        Index + 1
+    );
+serve_http_sequence(ListenSocket, _Parent, _TestRef, [], _Index) ->
+    gen_tcp:close(ListenSocket),
+    ok.
+
 -spec read_http_request(port()) -> {binary(), binary(), binary()}.
 read_http_request(Socket) ->
     {HeaderBlock, InitialBody} = receive_http_headers(Socket, <<>>),
@@ -1911,6 +2128,12 @@ valid_request() ->
             }
         ]
     }.
+
+-spec response_text(map()) -> binary().
+response_text(Response) ->
+    Message = maps:get(message, Response),
+    [Block] = maps:get(content, Message),
+    maps:get(text, Block).
 
 -spec status_reason(non_neg_integer()) -> binary().
 status_reason(200) -> <<"OK">>;
