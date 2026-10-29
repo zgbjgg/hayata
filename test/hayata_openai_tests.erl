@@ -962,6 +962,68 @@ http_stream_rejects_malformed_text_delta_test() ->
         exit(ServerPid, kill)
     end.
 
+http_stream_rejects_inconsistent_generation_id_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody = <<
+        "event: response.created\n",
+        "data: {\"response\":{\"id\":\"resp_original\"}}\n\n",
+        "event: response.completed\n",
+        "data: {\"response\":{"
+        "\"id\":\"resp_different\","
+        "\"status\":\"completed\","
+        "\"output\":[{"
+        "\"type\":\"message\","
+        "\"content\":[{"
+        "\"type\":\"output_text\","
+        "\"text\":\"Hello\""
+        "}]}]}}\n\n"
+    >>,
+
+    {Port, ServerPid} = start_http_stream_server(ResponseBody),
+    Config = http_test_config(Port),
+    Parent = self(),
+
+    Consumer = fun(Event) ->
+        Parent ! {stream_event, Event},
+        ok
+    end,
+
+    try
+        Result = hayata_openai:generate_stream(
+            valid_request(),
+            Config,
+            Consumer
+        ),
+
+        ?assertEqual(
+            {error, #{
+                code => invalid_response,
+                reason => inconsistent_generation_id
+            }},
+            Result
+        ),
+
+        receive
+            {stream_event, Event} ->
+                ?assertEqual(
+                    message_started,
+                    maps:get(type, Event)
+                )
+        after 5000 ->
+            error(message_started_event_not_received)
+        end,
+
+        receive
+            {stream_event, _UnexpectedEvent} ->
+                error(completion_event_received_for_inconsistent_id)
+        after 100 ->
+            ok
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(non_neg_integer(), [atom()]) -> [atom()].
 receive_stream_event_types(0, Acc) ->
     lists:reverse(Acc);
