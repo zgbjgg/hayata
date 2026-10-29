@@ -1354,6 +1354,123 @@ http_function_call_with_invalid_arguments_test() ->
         exit(ServerPid, kill)
     end.
 
+
+http_tool_definition_is_sent_to_openai_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_tool_definition\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"Ready\""
+          "}]}]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    Tool = #{
+        name => <<"get_weather">>,
+        description => <<"Get the current weather">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                city => #{type => string}
+            },
+            required => [city]
+        },
+        handler => fun(_Arguments) -> {ok, <<"sunny">>} end
+    },
+
+    Request = (valid_request())#{tools => [
+        maps:without([handler], Tool)
+    ]},
+
+    try
+        ?assertMatch(
+            {ok, #{finish_reason := stop}},
+            hayata_openai:generate(Request, Config)
+        ),
+
+        receive
+            {http_request, _RequestLine, _Headers, Body} ->
+                Payload = json:decode(Body),
+
+                [OpenAITool] = maps:get(<<"tools">>, Payload),
+
+                ?assertEqual(
+                    <<"function">>,
+                    maps:get(<<"type">>, OpenAITool)
+                ),
+                ?assertEqual(
+                    <<"get_weather">>,
+                    maps:get(<<"name">>, OpenAITool)
+                ),
+                ?assertEqual(
+                    <<"Get the current weather">>,
+                    maps:get(<<"description">>, OpenAITool)
+                ),
+
+                Parameters = maps:get(<<"parameters">>, OpenAITool),
+
+                ?assertEqual(
+                    <<"object">>,
+                    maps:get(<<"type">>, Parameters)
+                ),
+                ?assertEqual(
+                    [<<"city">>],
+                    maps:get(<<"required">>, Parameters)
+                ),
+
+                Properties = maps:get(<<"properties">>, Parameters),
+                City = maps:get(<<"city">>, Properties),
+
+                ?assertEqual(
+                    <<"string">>,
+                    maps:get(<<"type">>, City)
+                )
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
+http_request_without_tools_omits_tools_field_test() ->
+    {ok, _} = application:ensure_all_started(inets),
+
+    ResponseBody =
+        <<"{\"id\":\"resp_without_tools\","
+          "\"status\":\"completed\","
+          "\"output\":[{"
+          "\"type\":\"message\","
+          "\"content\":[{"
+          "\"type\":\"output_text\","
+          "\"text\":\"Hello\""
+          "}]}]}">>,
+
+    {Port, ServerPid} = start_http_server(ResponseBody),
+    Config = http_test_config(Port),
+
+    try
+        ?assertMatch(
+            {ok, #{finish_reason := stop}},
+            hayata_openai:generate(valid_request(), Config)
+        ),
+
+        receive
+            {http_request, _RequestLine, _Headers, Body} ->
+                Payload = json:decode(Body),
+                ?assertEqual(false, maps:is_key(<<"tools">>, Payload))
+        after 5000 ->
+            error(http_request_not_received)
+        end
+    after
+        exit(ServerPid, kill)
+    end.
+
 -spec receive_stream_event_types(
     reference(),
     non_neg_integer(),

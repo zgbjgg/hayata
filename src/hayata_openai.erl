@@ -114,19 +114,171 @@ validate_provider_config(_Config) ->
 
 -spec prepare_payload(map()) ->
     {ok, map()} | {error, term()}.
-prepare_payload(#{model := Model, messages := Messages})
+prepare_payload(#{model := Model, messages := Messages} = Request)
         when is_binary(Model), is_list(Messages) ->
     case convert_messages(Messages, []) of
         {ok, Input} ->
-            {ok, #{
+            Payload = #{
                 <<"model">> => Model,
                 <<"input">> => Input
-            }};
+            },
+            case convert_tools(maps:get(tools, Request, [])) of
+                {ok, []} ->
+                    {ok, Payload};
+                {ok, Tools} ->
+                    {ok, Payload#{<<"tools">> => Tools}};
+                {error, Reason} ->
+                    {error, Reason}
+            end;
         {error, Reason} ->
             {error, Reason}
     end;
 prepare_payload(_Request) ->
     {error, invalid_request}.
+
+-spec convert_tools(term()) -> {ok, [map()]} | {error, term()}.
+convert_tools(Tools) when is_list(Tools) ->
+    convert_tools(Tools, []);
+convert_tools(_Tools) ->
+    {error, invalid_tools}.
+
+-spec convert_tools([map()], [map()]) ->
+    {ok, [map()]} | {error, term()}.
+convert_tools([], Acc) ->
+    {ok, lists:reverse(Acc)};
+convert_tools([Tool | Rest], Acc) when is_map(Tool) ->
+    case convert_tool(Tool) of
+        {ok, Converted} ->
+            convert_tools(Rest, [Converted | Acc]);
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_tools(_Tools, _Acc) ->
+    {error, invalid_tool_definition}.
+
+-spec convert_tool(map()) -> {ok, map()} | {error, term()}.
+convert_tool(#{
+    name := Name,
+    description := Description,
+    parameters := Parameters
+})
+        when is_binary(Name),
+             byte_size(Name) > 0,
+             is_binary(Description),
+             byte_size(Description) > 0,
+             is_map(Parameters) ->
+    case convert_parameter_schema(Parameters) of
+        {ok, ConvertedParameters} ->
+            {ok, #{
+                <<"type">> => <<"function">>,
+                <<"name">> => Name,
+                <<"description">> => Description,
+                <<"parameters">> => ConvertedParameters
+            }};
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_tool(_Tool) ->
+    {error, invalid_tool_definition}.
+
+-spec convert_parameter_schema(map()) ->
+    {ok, map()} | {error, term()}.
+convert_parameter_schema(Schema) when is_map(Schema) ->
+    convert_schema_value(maps:to_list(Schema), #{});
+convert_parameter_schema(_Schema) ->
+    {error, invalid_tool_schema}.
+
+-spec convert_schema_value([{term(), term()}], map()) ->
+    {ok, map()} | {error, term()}.
+convert_schema_value([{type, Type} | Rest], Acc) ->
+    case schema_type(Type) of
+        {ok, JsonType} ->
+            convert_schema_value(
+                Rest,
+                maps:put(<<"type">>, JsonType, Acc)
+            );
+        error ->
+            {error, invalid_tool_schema}
+    end;
+convert_schema_value([{properties, Properties} | Rest], Acc)
+        when is_map(Properties) ->
+    case convert_schema_properties(maps:to_list(Properties), #{}) of
+        {ok, ConvertedProperties} ->
+            convert_schema_value(
+                Rest,
+                maps:put(<<"properties">>, ConvertedProperties, Acc)
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_schema_value([{required, Required} | Rest], Acc)
+        when is_list(Required) ->
+    case convert_required(Required, []) of
+        {ok, ConvertedRequired} ->
+            convert_schema_value(
+                Rest,
+                maps:put(<<"required">>, ConvertedRequired, Acc)
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_schema_value([{Key, Value} | Rest], Acc)
+        when Key =:= additionalProperties;
+             Key =:= enum;
+             Key =:= description ->
+    convert_schema_value(
+        Rest,
+        maps:put(atom_to_binary(Key, utf8), Value, Acc)
+    );
+convert_schema_value([], Acc) ->
+    {ok, Acc};
+convert_schema_value(_Other, _Acc) ->
+    {error, invalid_tool_schema}.
+
+-spec schema_type(term()) -> {ok, binary()} | error.
+schema_type(object) -> {ok, <<"object">>};
+schema_type(string) -> {ok, <<"string">>};
+schema_type(number) -> {ok, <<"number">>};
+schema_type(integer) -> {ok, <<"integer">>};
+schema_type(boolean) -> {ok, <<"boolean">>};
+schema_type(_Type) -> error.
+
+-spec convert_schema_properties([{term(), term()}], map()) ->
+    {ok, map()} | {error, term()}.
+convert_schema_properties([{Name, Schema} | Rest], Acc)
+        when is_atom(Name); is_binary(Name) ->
+    case convert_parameter_schema(Schema) of
+        {ok, ConvertedSchema} ->
+            convert_schema_properties(
+                Rest,
+                maps:put(normalize_tool_name(Name), ConvertedSchema, Acc)
+            );
+        {error, Reason} ->
+            {error, Reason}
+    end;
+convert_schema_properties([], Acc) ->
+    {ok, Acc};
+convert_schema_properties(_Properties, _Acc) ->
+    {error, invalid_tool_schema}.
+
+-spec convert_required([term()], [binary()]) ->
+    {ok, [binary()]} | {error, term()}.
+convert_required([Name | Rest], Acc)
+        when is_atom(Name); is_binary(Name) ->
+    convert_required(
+        Rest,
+        [normalize_tool_name(Name) | Acc]
+    );
+convert_required([], Acc) ->
+    {ok, lists:reverse(Acc)};
+convert_required(_Required, _Acc) ->
+    {error, invalid_tool_schema}.
+
+-spec normalize_tool_name(atom() | binary()) -> binary().
+normalize_tool_name(Name) when is_atom(Name) ->
+    atom_to_binary(Name, utf8);
+normalize_tool_name(Name) when is_binary(Name) ->
+    Name.
 
 -spec convert_messages(list(), list()) ->
     {ok, list()} | {error, term()}.
