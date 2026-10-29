@@ -152,11 +152,10 @@ validate_argument_types([{Key, Value} | Rest], Properties) ->
         {ok, NormalizedKey} ->
             case find_key(NormalizedKey, Properties) of
                 {ok, PropertySchema} when is_map(PropertySchema) ->
-                    ExpectedType = maps:get(type, PropertySchema, undefined),
                     case validate_argument_type(
                         NormalizedKey,
                         Value,
-                        ExpectedType
+                        PropertySchema
                     ) of
                         ok ->
                             validate_argument_types(Rest, Properties);
@@ -172,27 +171,42 @@ validate_argument_types([{Key, Value} | Rest], Properties) ->
 validate_argument_types([], _Properties) ->
     ok.
 
--spec validate_argument_type(binary(), term(), term()) ->
+-spec validate_argument_type(binary(), term(), map()) ->
     ok | {error, term()}.
-validate_argument_type(_Name, Value, string) when is_binary(Value) ->
-    ok;
-validate_argument_type(_Name, Value, number) when is_number(Value) ->
-    ok;
-validate_argument_type(_Name, Value, integer) when is_integer(Value) ->
-    ok;
-validate_argument_type(_Name, Value, boolean) when is_boolean(Value) ->
-    ok;
-validate_argument_type(_Name, Value, object) when is_map(Value) ->
-    ok;
-validate_argument_type(_Name, _Value, Type)
-        when Type =:= string;
-             Type =:= number;
-             Type =:= integer;
-             Type =:= boolean;
-             Type =:= object ->
-    {error, {invalid_type, _Name, Type}};
-validate_argument_type(_Name, _Value, _Type) ->
+validate_argument_type(
+    Name,
+    Value,
+    #{type := object} = Schema
+) when is_map(Value) ->
+    case validate_arguments(Value, Schema) of
+        ok ->
+            ok;
+        {error, Reason} ->
+            {error, {invalid_object, Name, Reason}}
+    end;
+validate_argument_type(Name, Value, #{type := string}) ->
+    validate_primitive_type(Name, Value, string);
+validate_argument_type(Name, Value, #{type := number}) ->
+    validate_primitive_type(Name, Value, number);
+validate_argument_type(Name, Value, #{type := integer}) ->
+    validate_primitive_type(Name, Value, integer);
+validate_argument_type(Name, Value, #{type := boolean}) ->
+    validate_primitive_type(Name, Value, boolean);
+validate_argument_type(_Name, _Value, _Schema) ->
     {error, invalid_schema}.
+
+-spec validate_primitive_type(binary(), term(), atom()) ->
+    ok | {error, term()}.
+validate_primitive_type(_Name, Value, string) when is_binary(Value) ->
+    ok;
+validate_primitive_type(_Name, Value, number) when is_number(Value) ->
+    ok;
+validate_primitive_type(_Name, Value, integer) when is_integer(Value) ->
+    ok;
+validate_primitive_type(_Name, Value, boolean) when is_boolean(Value) ->
+    ok;
+validate_primitive_type(Name, _Value, Type) ->
+    {error, {invalid_type, Name, Type}}.
 
 -spec find_key(binary(), map()) -> {ok, term()} | error.
 find_key(Name, Map) ->
