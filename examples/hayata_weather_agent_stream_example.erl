@@ -1,4 +1,3 @@
-
 -module(hayata_weather_agent_stream_example).
 
 -export([
@@ -6,7 +5,7 @@
     get_current_weather/1
 ]).
 
--define(AGENT_ID, hayata_weather_agent_example).
+-define(AGENT_ID, hayata_weather_agent_stream).
 -define(MODEL, <<"gpt-4o-mini">>).
 
 -doc("Runs the streaming weather agent using OpenAI.").
@@ -33,46 +32,16 @@ start_weather_agent(ApiKey) ->
         provider_config => #{api_key => ApiKey}
     },
 
-    Tools = [
-        #{
-            name => <<"get_current_weather">>,
-            description => unicode:characters_to_binary(
-                "Gets the current weather for a specific location."
-            ),
-            parameters => #{
-                type => object,
-                properties => #{
-                    location => #{type => string}
-                },
-                required => [location]
-            },
-            handler => fun ?MODULE:get_current_weather/1
-        }
-    ],
-
-    case hayata_tool:definitions(Tools) of
-        {ok, Definitions} ->
-            start_agent(LLM, Tools, Definitions);
-        {error, Reason} ->
-            {error, {invalid_tool_definitions, Reason}}
-    end.
-
--spec start_agent(map(), [map()], [map()]) ->
-    {ok, map()} | {error, term()}.
-start_agent(LLM, Tools, Definitions) ->
     Nodes = #{
-        agent => fun(State) ->
-            agent_node(State, LLM, Definitions)
-        end,
-        tools => fun(State) ->
-            tools_node(State, Tools)
-        end
+        agent => fun agent_node/1,
+        tools => fun tools_node/1
     },
 
     Config = #{
         id => ?AGENT_ID,
         state => #{},
         nodes => Nodes,
+        llm => LLM,
         decision_policy => fun decision_policy/1,
         max_steps => 10,
         execution_timeout => 60000
@@ -97,7 +66,7 @@ start_agent(LLM, Tools, Definitions) ->
 -spec execute_query(pid()) -> {ok, map()} | {error, term()}.
 execute_query(AgentPid) ->
     Query = unicode:characters_to_binary(
-        "¿Necesito paraguas si estoy en Buenos Aires hoy?"
+        "Do I need an umbrella if I am in Buenos Aires today?"
     ),
 
     io:format("~n[USER] ~ts~n", [Query]),
@@ -105,7 +74,10 @@ execute_query(AgentPid) ->
     case hayata_agent:run(
         AgentPid,
         Query,
-        #{subscriber => self()}
+        #{
+            subscriber => self(),
+            stream => true
+        }
     ) of
         {ok, InvocationId} ->
             await_result(InvocationId, 120000);
@@ -116,82 +88,110 @@ execute_query(AgentPid) ->
 -spec await_result(reference(), timeout()) ->
     {ok, map()} | {error, term()}.
 await_result(InvocationId, Timeout) ->
-    receive
-        {hayata_agent_result, InvocationId, {ok, Result}} ->
-            io:format(
-                "~n[FINAL] Streaming completed successfully.~n"
-            ),
-            {ok, Result};
-        {hayata_agent_result, InvocationId, {error, Reason}} ->
-            {error, Reason}
-    after Timeout ->
-        {error, invocation_timeout}
+    Deadline = erlang:monotonic_time(millisecond) + Timeout,
+    await_result_until(InvocationId, Deadline).
+
+-spec await_result_until(reference(), integer()) ->
+    {ok, map()} | {error, term()}.
+await_result_until(InvocationId, Deadline) ->
+    Remaining = Deadline - erlang:monotonic_time(millisecond),
+
+    case Remaining =< 0 of
+        true ->
+            {error, invocation_timeout};
+        false ->
+            receive
+                {hayata_agent_event, InvocationId, Event} ->
+                    handle_agent_event(Event),
+                    await_result_until(InvocationId, Deadline);
+
+                {hayata_agent_result, InvocationId, {ok, Result}} ->
+                    io:format("~n[FINAL] Streaming completed successfully.~n"),
+                    {ok, Result};
+
+                {hayata_agent_result, InvocationId, {error, Reason}} ->
+                    {error, Reason}
+            after Remaining ->
+                {error, invocation_timeout}
+            end
     end.
 
--spec agent_node(map(), map(), [map()]) -> map().
-agent_node(State, LLM, ToolDefinitions) ->
-    Messages = current_messages(State),
-
-    io:format("[AGENT] Calling OpenAI with streaming...~n"),
-
-    Request = #{
-        messages => Messages,
-        tools => ToolDefinitions
-    },
-
-    case hayata_llm:generate_stream(
-        LLM,
-        Request,
-        fun stream_consumer/1
-    ) of
-        {ok, Response} ->
-            Message = maps:get(message, Response),
-            Calls = maps:get(tool_calls, Message, []),
-            UpdatedMessages = Messages ++ [Message],
-
-            case Calls of
-                [] ->
-                    io:format("[AGENT] No tool calls; finishing.~n"),
-                    #{
-                        messages => UpdatedMessages,
-                        pending_tool_calls => [],
-                        last_response => Response,
-                        next_action => finish
-                    };
-                _ ->
-                    io:format(
-                        "[AGENT] Requested tools: ~p~n",
-                        [[maps:get(name, Call) || Call <- Calls]]
-                    ),
-                    #{
-                        messages => UpdatedMessages,
-                        pending_tool_calls => Calls,
-                        last_response => Response,
-                        next_action => tools
-                    }
-            end;
-        {error, Reason} ->
-            error({llm_generation_failed, Reason})
-    end.
-
--spec stream_consumer(map()) -> ok | {error, term()}.
-stream_consumer(#{
-    type := content_delta,
+-spec handle_agent_event(map()) -> ok.
+handle_agent_event(#{
+    type := llm_content_delta,
     data := #{text := Text}
 }) when is_binary(Text) ->
     io:put_chars(Text),
     ok;
-stream_consumer(#{
-    type := generation_failed,
-    data := #{error := Error}
+handle_agent_event(#{
+    type := llm_generation_completed
 }) ->
-    io:format("~n[STREAM ERROR] ~p~n", [Error]),
-    ok;
-stream_consumer(#{type := generation_completed}) ->
     io:format("~n"),
     ok;
-stream_consumer(_Event) ->
+handle_agent_event(#{
+    type := llm_generation_failed,
+    data := Data
+}) ->
+    io:format("~n[STREAM ERROR] ~p~n", [Data]),
+    ok;
+handle_agent_event(_Event) ->
     ok.
+
+%% Hayata injects hayata_llm_stream into the node state.
+%% The stream events are forwarded through the agent subscriber.
+
+-spec agent_node(map()) -> map().
+agent_node(State) ->
+    LLMStream = maps:get(hayata_llm_stream, State),
+    Messages = current_messages(State),
+    Tools = weather_tools(),
+
+    case hayata_tool:definitions(Tools) of
+        {ok, Definitions} ->
+            Request = #{
+                messages => Messages,
+                tools => Definitions
+            },
+
+            io:format("[AGENT] Calling the injected streaming function...~n"),
+
+            case LLMStream(Request) of
+                {ok, Response} ->
+                    handle_llm_response(Response, Messages);
+                {error, Reason} ->
+                    error({llm_generation_failed, Reason})
+            end;
+        {error, Reason} ->
+            error({invalid_tool_definitions, Reason})
+    end.
+
+-spec handle_llm_response(map(), [map()]) -> map().
+handle_llm_response(Response, Messages) ->
+    Message = maps:get(message, Response),
+    Calls = maps:get(tool_calls, Message, []),
+    UpdatedMessages = Messages ++ [Message],
+
+    case Calls of
+        [] ->
+            io:format("[AGENT] No tool calls; finishing.~n"),
+            #{
+                messages => UpdatedMessages,
+                pending_tool_calls => [],
+                last_response => Response,
+                next_action => finish
+            };
+        _ ->
+            io:format(
+                "[AGENT] Requested tools: ~p~n",
+                [[maps:get(name, Call) || Call <- Calls]]
+            ),
+            #{
+                messages => UpdatedMessages,
+                pending_tool_calls => Calls,
+                last_response => Response,
+                next_action => tools
+            }
+    end.
 
 -spec current_messages(map()) -> [map()].
 current_messages(#{messages := Messages}) ->
@@ -206,10 +206,30 @@ current_messages(#{input := Input}) ->
         }
     ].
 
--spec tools_node(map(), [map()]) -> map().
-tools_node(State, Tools) ->
+-spec weather_tools() -> [map()].
+weather_tools() ->
+    [
+        #{
+            name => <<"get_current_weather">>,
+            description => unicode:characters_to_binary(
+                "Gets the current weather for a specific location."
+            ),
+            parameters => #{
+                type => object,
+                properties => #{
+                    location => #{type => string}
+                },
+                required => [location]
+            },
+            handler => fun ?MODULE:get_current_weather/1
+        }
+    ].
+
+-spec tools_node(map()) -> map().
+tools_node(State) ->
     Calls = maps:get(pending_tool_calls, State, []),
     Messages = maps:get(messages, State),
+    Tools = weather_tools(),
 
     io:format(
         "[TOOLS] Executing ~p tool call(s).~n",
@@ -268,6 +288,8 @@ tool_result_text(Result) ->
             <<"{\"error\":\"tool_result_not_serializable\"}">>
     end.
 
+%% The policy receives the policy context.
+
 -spec decision_policy(map()) -> tuple().
 decision_policy(#{step := 0, input := Input}) ->
     {next, agent, Input};
@@ -308,7 +330,7 @@ response_text(Response) ->
 get_current_weather(#{<<"location">> := Location}) ->
     get_current_weather(#{location => Location});
 get_current_weather(#{location := Location})
-        when is_binary(Location) ->
+    when is_binary(Location) ->
     LowerLocation = unicode:characters_to_binary(
         string:lowercase(Location)
     ),
