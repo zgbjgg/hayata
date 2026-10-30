@@ -150,6 +150,229 @@ Erlang code path, compile it, and call:
 hello_hayata:run().
 ```
 
+## Agent Execution Contract
+
+Hayata uses two different function contracts during agent execution:
+
+- **Node functions** receive the node execution state and return a map of state updates.
+- **Decision policies** receive the agent execution context and decide which node executes next, whether multiple nodes should execute in parallel, or whether the invocation should finish.
+
+Both functions receive a single map argument, but their available fields and responsibilities are different.
+
+### Node Function
+
+Every node is defined as a one-argument function:
+
+```erlang
+Node = fun(State) ->
+    %% Read the current state.
+    Input = maps:get(input, State),
+
+    %% Return state updates.
+    #{
+        answer => Input,
+        status => completed
+    }
+end.
+```
+
+The `State` argument contains the agent's current shared state, with the current node input added under the `input` key.
+
+Its structure is:
+
+```erlang
+#{
+    %% All fields from the agent's current shared state.
+    input => NodeInput,
+
+    %% Other application-defined state fields.
+    messages => [],
+    customer => undefined
+}
+```
+
+The following fields are available:
+
+| Field | Description |
+|---|---|
+| `input` | Input explicitly passed to the node by the decision policy. |
+| Application-defined fields | All fields currently present in the agent's shared state. |
+| `hayata_streamer` | Optional function for publishing partial node results. Available only when invocation streaming is enabled and a subscriber is configured. |
+| `hayata_llm` | Optional function for invoking the configured LLM without streaming. Available when an LLM configuration is provided to the agent. |
+| `hayata_llm_stream` | Optional function for invoking the configured LLM with streaming. Available when an LLM configuration is provided. Streaming requires invocation streaming to be enabled. |
+| `hayata_tool_loop` | Optional function for executing an LLM tool-calling loop. Available when an LLM configuration is provided. |
+
+#### Returning node updates
+
+A node must return a map containing the state updates it wants to publish:
+
+```erlang
+Node = fun(State) ->
+    Input = maps:get(input, State),
+
+    #{
+        response => Input,
+        processed => true
+    }
+end.
+```
+
+Hayata merges the returned map into the current shared agent state. Existing keys with the same name are replaced by the returned values; keys not included in the update remain unchanged.
+
+```erlang
+NewState = maps:merge(CurrentState, NodeUpdates).
+```
+
+Nodes do not directly mutate the shared agent state. They return updates, and Hayata applies them after successful execution.
+
+#### Node input and state
+
+The input passed to a node is determined by the decision policy:
+
+```erlang
+{next, NodeId, NodeInput}
+```
+
+Hayata adds this value to the current shared state under the `input` key before invoking the node.
+
+For parallel execution, every selected node receives the same input and the same current shared state. Their results are collected independently and are not merged into shared state automatically.
+
+#### Partial results
+
+When invocation streaming is enabled, a node can publish partial results using `hayata_streamer`:
+
+```erlang
+Node = fun(State) ->
+    Streamer = maps:get(hayata_streamer, State),
+
+    ok = Streamer(#{chunk => <<"First part">>}),
+    ok = Streamer(#{chunk => <<"Second part">>}),
+
+    #{completed => true}
+end.
+```
+
+Partial results are emitted as `node_partial_result` events. They are notifications and do not modify shared agent state.
+
+### Decision Policy
+
+The decision policy is also a one-argument function:
+
+```erlang
+DecisionPolicy = fun(Context) ->
+    case maps:get(step, Context) of
+        0 ->
+            {next, first_node, <<"Hello">>};
+        1 ->
+            {finish, maps:get(state, Context)}
+    end
+end.
+```
+
+The `Context` map provides information about the current agent invocation and its execution progress.
+
+Its structure is:
+
+```erlang
+#{
+    agent_id => AgentId,
+    state => CurrentSharedState,
+    input => OriginalInvocationInput,
+    step => CurrentStep,
+    max_steps => MaxSteps,
+    parallel_results => ParallelResults
+}
+```
+
+The following fields are available:
+
+| Field | Description |
+|---|---|
+| `agent_id` | Identifier of the running agent. |
+| `state` | Current shared agent state, including updates from previously completed nodes. |
+| `input` | Original input supplied when starting the invocation with `hayata_agent:run/2` or `run/3`. |
+| `step` | Current execution step. Starts at `0` and increases when node executions are scheduled. |
+| `max_steps` | Maximum number of node executions allowed for the invocation. |
+| `parallel_results` | Ordered list of results from the most recently completed parallel transition. It is `undefined` when no parallel results are available. |
+
+#### Policy decisions
+
+The decision policy must return one of the following values:
+
+**Execute one node**
+
+```erlang
+{next, NodeId, Input}
+```
+
+Schedules a single node and passes `Input` to its function.
+
+**Execute multiple nodes in parallel**
+
+```erlang
+{next, [NodeA, NodeB], Input}
+```
+
+Schedules multiple distinct nodes concurrently. All nodes receive the same input and shared state.
+
+When every node completes successfully, their returned update maps become available through `parallel_results`, preserving the order of the requested node identifiers.
+
+**Finish the invocation**
+
+```erlang
+{finish, Result}
+```
+
+Completes the invocation and publishes `Result` as its final outcome.
+
+**Return an error**
+
+```erlang
+{error, Reason}
+```
+
+Fails the current invocation with the provided reason.
+
+Any other return value is considered an invalid policy decision.
+
+#### Parallel execution example
+
+```erlang
+DecisionPolicy = fun(Context) ->
+    case maps:get(step, Context) of
+        0 ->
+            {next, [customer_node, orders_node], maps:get(input, Context)};
+
+        2 ->
+            [Customer, Orders] = maps:get(parallel_results, Context),
+
+            {next, aggregate_node, #{
+                customer => Customer,
+                orders => Orders
+            }};
+
+        3 ->
+            {finish, maps:get(state, Context)}
+    end
+end.
+```
+
+The `parallel_results` list follows the order in which the nodes were requested, regardless of their completion order.
+
+### Important distinctions
+
+| Concept | Node function | Decision policy |
+|---|---|---|
+| Argument | Node execution state | Agent execution context |
+| Receives current shared state | Yes | Yes |
+| Receives original invocation input | Only through shared state if retained by the application | Yes, through `input` |
+| Receives node-specific input | Yes, through `input` | Selects it when returning `next` |
+| Receives execution step | No | Yes |
+| Receives parallel results | No, unless explicitly passed as node input or included in shared state | Yes |
+| Returns | State update map | Execution decision tuple |
+
+This separation keeps node execution focused on processing data and returning state updates, while the decision policy remains responsible for orchestration and control flow.
+
 ## Conversational memory
 
 Agents can optionally preserve conversation history between successive
