@@ -858,6 +858,124 @@ run_rejects_malformed_response_fields_test() ->
         InvalidResponses
     ).
 
+run_executes_rag_through_tool_handler_test() ->
+    Parent = self(),
+
+    Retriever = fun(Query, Options) ->
+        Parent ! {rag_retriever_called, Query, Options},
+        {ok, #{
+            documents => [
+                #{
+                    id => <<"doc-001">>,
+                    content => <<"Hayata is built with Erlang/OTP.">>,
+                    metadata => #{source => <<"hayata-guide">>},
+                    score => 0.98
+                }
+            ]
+        }}
+    end,
+
+    {ok, Rag} = hayata_rag:new(#{
+        retrieve => Retriever
+    }),
+
+    RagTool = #{
+        name => <<"search_knowledge">>,
+        description => <<"Searches the knowledge base for relevant documents.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                query => #{
+                    type => string,
+                    description => <<"The information to search for.">>
+                }
+            },
+            required => [<<"query">>]
+        },
+        handler => fun(Arguments) ->
+            Query = maps:get(query, Arguments),
+            Rag(Query, #{limit => 3})
+        end
+    },
+
+    ToolCallResponse = #{
+        message => #{
+            role => assistant,
+            content => [],
+            tool_calls => [
+                #{
+                    id => <<"call_rag_001">>,
+                    name => <<"search_knowledge">>,
+                    arguments => #{
+                        query => <<"How is Hayata built?">>
+                    }
+                }
+            ]
+        },
+        finish_reason => tool_calls
+    },
+
+    LLM = fun(Request) ->
+        case length(maps:get(messages, Request)) of
+            1 ->
+                {ok, ToolCallResponse};
+            _ ->
+                Parent ! {
+                    rag_messages,
+                    maps:get(messages, Request)
+                },
+                {ok, text_response(<<"Hayata is built with Erlang/OTP.">>)}
+        end
+    end,
+
+    {ok, Result} = hayata_tool_loop:run(
+        LLM,
+        request(),
+        [RagTool],
+        5
+    ),
+
+    ?assertEqual(
+        <<"Hayata is built with Erlang/OTP.">>,
+        response_text(maps:get(response, Result))
+    ),
+    ?assertEqual(2, maps:get(iterations, Result)),
+
+    receive
+        {rag_retriever_called, Query, Options} ->
+            ?assertEqual(<<"How is Hayata built?">>, Query),
+            ?assertEqual(#{limit => 3}, Options)
+    after 1000 ->
+        error(rag_retriever_was_not_called)
+    end,
+
+    receive
+        {rag_messages, Messages} ->
+            [_UserMessage, _AssistantMessage, ToolMessage] = Messages,
+
+            ?assertEqual(tool, maps:get(role, ToolMessage)),
+            ?assertEqual(
+                <<"call_rag_001">>,
+                maps:get(tool_call_id, ToolMessage)
+            ),
+
+            [Content] = maps:get(content, ToolMessage),
+            Decoded = json:decode(maps:get(text, Content)),
+
+            [Document] = maps:get(<<"documents">>, Decoded),
+
+            ?assertEqual(
+                <<"doc-001">>,
+                maps:get(<<"id">>, Document)
+            ),
+            ?assertEqual(
+                <<"Hayata is built with Erlang/OTP.">>,
+                maps:get(<<"content">>, Document)
+            )
+    after 1000 ->
+        error(rag_tool_result_not_received)
+    end.
+
 -spec request() -> map().
 request() ->
     #{
