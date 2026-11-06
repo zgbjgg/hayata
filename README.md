@@ -29,6 +29,8 @@ feature-for-feature clone of another API.
 -   Conservative handling of uncertain tasks: a task marked as running
     without a durable result is not silently re-executed.
 -   Telemetry lifecycle events for agents, nodes, edges, and reducers.
+-   Provider-agnostic RAG retrieval with normalized document results,
+    usable directly from nodes or through LLM tool calling.
 
 ## Architecture
 
@@ -201,6 +203,7 @@ The following fields are available:
 | `hayata_llm` | Optional function for invoking the configured LLM without streaming. Available when an LLM configuration is provided to the agent. |
 | `hayata_llm_stream` | Optional function for invoking the configured LLM with streaming. Available when an LLM configuration is provided. Streaming requires invocation streaming to be enabled. |
 | `hayata_tool_loop` | Optional function for executing an LLM tool-calling loop. Available when an LLM configuration is provided. |
+| `hayata_rag` | Optional function for retrieving relevant documents from a configured RAG provider. Available when a RAG configuration is provided to the agent. |
 
 #### Returning node updates
 
@@ -791,6 +794,205 @@ If a task may have affected an external service before its result was durably sa
     potentially non-idempotent work.
 -   Validate behavior incrementally with EUnit and explicit VM-restart
     checks.
+
+## Retrieval-Augmented Generation (RAG)
+
+Hayata provides a provider-agnostic retrieval interface through the
+`hayata_rag` module. It allows nodes to retrieve relevant documents
+from an application-defined retrieval provider without coupling the
+framework to a particular vector database, embedding service, or
+search engine.
+
+Hayata does not implement document indexing, chunking, embedding
+generation, or vector storage. Applications integrate their own
+retrieval infrastructure and provide a retriever function that
+implements the Hayata contract.
+
+### Configuring a retriever
+
+Configure RAG using the `rag_config` key in the agent configuration.
+The `retrieve` entry accepts either an anonymous function with arity
+two or an MFA tuple pointing to an exported function with arity two.
+
+The retriever receives a query and an options map. It must return
+`{ok, #{documents := Documents}}` or `{error, Reason}`.
+
+```erlang
+Retriever = fun(Query, Options) ->
+    %% Call your own retrieval infrastructure.
+    my_retriever:search(Query, Options)
+end,
+
+Config = #{
+    id => knowledge_agent,
+    state => #{},
+    nodes => Nodes,
+    decision_policy => DecisionPolicy,
+    rag_config => #{
+        retrieve => Retriever
+    }
+}.
+```
+
+An MFA retriever can also be configured:
+
+```erlang
+rag_config => #{
+    retrieve => {my_retriever, search}
+}
+```
+
+The provider is responsible for translating its native response into
+the normalized Hayata document contract.
+
+### Normalized document contract
+
+Every retrieved document must contain:
+
+| Field | Type | Required | Description |
+|---|---|---|---|
+| `id` | Binary | Yes | Non-empty document or chunk identifier. |
+| `content` | Binary | Yes | Retrieved text content. |
+| `metadata` | Map | Yes | Application-defined document metadata. |
+| `score` | Number | No | Retrieval relevance score, when available. |
+
+A valid retriever response looks like this:
+
+```erlang
+{ok, #{
+    documents => [
+        #{
+            id => <<"chunk-001">>,
+            content => <<"Erlang uses lightweight processes.">>,
+            metadata => #{
+                source => <<"erlang-guide.pdf">>,
+                page => 12
+            },
+            score => 0.95
+        }
+    ]
+}}
+```
+
+The score is optional because retrieval providers do not necessarily
+expose comparable relevance scores.
+
+The `hayata_rag` module validates the retriever configuration and
+normalizes its result contract. Invalid responses are rejected, while
+provider errors are propagated.
+
+### Using RAG directly from a node
+
+When `rag_config` is configured, Hayata injects a `hayata_rag`
+function into every node execution context.
+
+The function accepts a binary query and an options map:
+
+```erlang
+Rag(Query, Options)
+```
+
+It returns either a normalized document result or an error.
+
+```erlang
+RetrieveNode = fun(Context) ->
+    Rag = maps:get(hayata_rag, Context),
+
+    case Rag(<<"Erlang process model">>, #{limit => 5}) of
+        {ok, #{documents := Documents}} ->
+            #{
+                retrieved_documents => Documents
+            };
+
+        {error, Reason} ->
+            #{
+                retrieval_error => Reason
+            }
+    end
+end.
+```
+
+RAG retrieval is independent of LLM configuration. An agent can
+retrieve and process documents without configuring an LLM provider.
+
+### Using RAG through LLM tool calling
+
+RAG can also be exposed as a tool to an LLM through
+`hayata_tool_loop`. This allows the model to decide when retrieval is
+necessary.
+
+The tool handler delegates to the same injected `hayata_rag` function.
+There is no separate retrieval implementation or RAG-specific tool
+runtime.
+
+```erlang
+RagNode = fun(Context) ->
+    Rag = maps:get(hayata_rag, Context),
+    ToolLoop = maps:get(hayata_tool_loop, Context),
+
+    SearchTool = #{
+        name => <<"search_knowledge">>,
+        description =>
+            <<"Searches the knowledge base for relevant documents.">>,
+        parameters => #{
+            type => object,
+            properties => #{
+                query => #{
+                    type => string,
+                    description => <<"The information to search for.">>
+                }
+            },
+            required => [<<"query">>]
+        },
+        handler => fun(Arguments) ->
+            Rag(
+                maps:get(query, Arguments),
+                #{limit => 5}
+            )
+        end
+    },
+
+    Request = #{
+        messages => [
+            #{
+                role => user,
+                content => [
+                    #{
+                        type => text,
+                        text => <<"Explain the system architecture.">>
+                    }
+                ]
+            }
+        ]
+    },
+
+    case ToolLoop(Request, [SearchTool], 5) of
+        {ok, Result} ->
+            #{answer => maps:get(response, Result)};
+
+        {error, Reason} ->
+            #{error => Reason}
+    end
+end.
+```
+
+This example requires both `rag_config` and an LLM configuration in
+the agent. The `hayata_tool_loop` capability is available when an LLM
+is configured.
+
+### Design boundaries
+
+Hayata deliberately keeps retrieval separate from generation:
+
+- `hayata_rag` handles document retrieval and result validation.
+- `hayata_llm` handles text generation.
+- `hayata_tool_loop` coordinates LLM tool calling and execution.
+- Applications own their retrieval infrastructure, indexing,
+  embeddings, and document lifecycle.
+
+This separation allows applications to use different retrieval
+technologies without requiring provider-specific adapters in the
+Hayata core.
 
 ## LLM
 
