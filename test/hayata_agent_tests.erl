@@ -5211,6 +5211,145 @@ llm_stream_is_unavailable_when_subscription_disabled_test() ->
         )
     end).
 
+rag_is_available_to_node_test() ->
+    Documents = [
+        #{
+            id => <<"chunk-001">>,
+            content => <<"Erlang uses lightweight processes.">>,
+            metadata => #{source => <<"guide.pdf">>},
+            score => 0.95
+        }
+    ],
+
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            retrieve => fun(Context) ->
+                Rag = maps:get(hayata_rag, Context),
+                {ok, #{documents := Retrieved}} =
+                    Rag(<<"Erlang processes">>, #{limit => 5}),
+                #{retrieved_documents => Retrieved}
+            end
+        },
+        rag_config => #{
+            retrieve => fun(_Query, _Options) ->
+                {ok, #{documents => Documents}}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, retrieve, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertEqual(
+            Documents,
+            maps:get(retrieved_documents, Result)
+        )
+    end).
+
+rag_is_unavailable_without_configuration_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            inspect => fun(Context) ->
+                #{rag_available => maps:is_key(hayata_rag, Context)}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, inspect, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertEqual(false, maps:get(rag_available, Result))
+    end).
+
+rag_rejects_invalid_agent_configuration_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            work => fun(_Context) -> #{} end
+        },
+        rag_config => #{},
+        decision_policy => fun(_Context) ->
+            {finish, ok}
+        end,
+        max_steps => 3
+    },
+
+    ?assertMatch(
+        {error, _Reason},
+        hayata_agent_sup:start_link(Config)
+    ).
+
+rag_works_without_llm_configuration_test() ->
+    Config = #{
+        id => make_ref(),
+        state => #{},
+        nodes => #{
+            retrieve => fun(Context) ->
+                Rag = maps:get(hayata_rag, Context),
+                {ok, #{documents := Documents}} =
+                    Rag(<<"Hayata">>, #{}),
+                #{documents => Documents}
+            end
+        },
+        rag_config => #{
+            retrieve => fun(_Query, _Options) ->
+                {ok, #{
+                    documents => [
+                        #{
+                            id => <<"hayata-001">>,
+                            content => <<"Hayata is an Erlang framework.">>,
+                            metadata => #{}
+                        }
+                    ]
+                }}
+            end
+        },
+        decision_policy => fun(Context) ->
+            case maps:get(step, Context) of
+                0 -> {next, retrieve, undefined};
+                1 -> {finish, maps:get(state, Context)}
+            end
+        end,
+        max_steps => 3
+    },
+
+    with_agent(Config, fun(Agent) ->
+        {ok, _InvocationId} = hayata_agent:run(Agent, start),
+        await_status(Agent, completed, 100),
+
+        {ok, Result} = hayata_agent:get_result(Agent),
+
+        ?assertMatch(
+            #{documents := [_]},
+            Result
+        )
+    end).
+
 conversation_memory_test_config(Enabled) ->
     #{
         id => make_ref(),

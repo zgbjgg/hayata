@@ -47,7 +47,8 @@
     stream_enabled = false,
     stream_sequence = 0,
     llm_config = undefined,
-    conversation_memory = false
+    conversation_memory = false,
+    rag_function = undefined
 }).
 
 -type config() :: #{
@@ -146,7 +147,8 @@ init(Config) ->
                     fun hayata_node:start_execution/6
                 ),
                 llm_config = maps:get(llm, Config, undefined),
-                conversation_memory = maps:get(conversation_memory, Config, false)
+                conversation_memory = maps:get(conversation_memory, Config, false),
+                rag_function = build_rag_function(maps:get(rag_config, Config, undefined))
             },
             {ok, restore_invocation_state(State)};
         {error, Reason} ->
@@ -495,7 +497,12 @@ validate_agent_config(Config, Nodes) ->
         ok ->
             case validate_conversation_memory(Config) of
                 ok ->
-                    validate_llm_config(Config);
+                    case validate_llm_config(Config) of
+                        ok ->
+                            validate_rag_config(Config);
+                        {error, _Reason} = Error ->
+                            Error
+                    end;
                 {error, _Reason} = Error ->
                     Error
             end;
@@ -1909,7 +1916,14 @@ node_execution_context(NodeInput, NodeId, ExecutionId, State) ->
         ExecutionId,
         State
     ),
-    maybe_add_llm(Context, NodeId, ExecutionId, AgentPid, State).
+    LLMContext = maybe_add_llm(
+        Context,
+        NodeId,
+        ExecutionId,
+        AgentPid,
+        State
+    ),
+    maybe_add_rag(LLMContext, State).
 
 -spec maybe_add_streamer(
     map(),
@@ -2085,3 +2099,39 @@ llm_event_data(NodeId, GenerationId, Data) ->
         node_id => NodeId,
         generation_id => GenerationId
     }.
+
+-spec build_rag_function(undefined | map()) ->
+    undefined | function().
+build_rag_function(undefined) ->
+    undefined;
+build_rag_function(RagConfig) ->
+    {ok, Rag} = hayata_rag:new(RagConfig),
+    Rag.
+
+-spec validate_rag_config(map()) -> ok | {error, term()}.
+validate_rag_config(Config) ->
+    case maps:find(rag_config, Config) of
+        error ->
+            ok;
+        {ok, undefined} ->
+            ok;
+        {ok, RagConfig} ->
+            case hayata_rag:validate_config(RagConfig) of
+                ok ->
+                    ok;
+                {error, Reason} ->
+                    {error, {invalid_rag_config, Reason}}
+            end
+    end.
+
+-spec maybe_add_rag(map(), #agent_state{}) -> map().
+maybe_add_rag(
+    Context,
+    #agent_state{rag_function = undefined}
+) ->
+    Context;
+maybe_add_rag(
+    Context,
+    #agent_state{rag_function = Rag}
+) when is_function(Rag, 2) ->
+    maps:put(hayata_rag, Rag, Context).

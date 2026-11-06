@@ -21,3 +21,5 @@ rebar3.crashdump
 codecov.json
 .tool-versions
 doc
+Mnesia*
+.DS_Store
