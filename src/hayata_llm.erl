@@ -20,7 +20,7 @@
     atom() => term()
 }.
 
--doc("Validates the adapter and model configuration.").
+%% @doc Validates the adapter and model configuration.
 -spec validate_config(term()) -> ok | {error, term()}.
 validate_config(Config) when is_map(Config) ->
     case {
@@ -45,7 +45,7 @@ validate_config(Config) when is_map(Config) ->
 validate_config(_Config) ->
     {error, invalid_config}.
 
--doc("Returns the configured adapter's normalized model capabilities.").
+%% @doc Returns the configured adapter's normalized model capabilities.
 -spec capabilities(config()) ->
     {ok, hayata_llm_adapter:capabilities()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -70,7 +70,7 @@ capabilities(Config) ->
             {error, #{code => invalid_request, reason => Reason}}
     end.
 
--doc("Generates a normalized response using the configured model.").
+%% @doc Generates a normalized response using the configured model.
 -spec generate(config(), request_input()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -93,7 +93,7 @@ generate(Config, Request) ->
             {error, #{code => invalid_request, reason => Reason}}
     end.
 
--doc("Generates a normalized response and forwards validated stream events.").
+%% @doc Generates a normalized response and forwards validated stream events.
 -spec generate_stream(config(), request_input(),
     hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |

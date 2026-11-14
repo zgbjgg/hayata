@@ -19,7 +19,13 @@
 -define(DEFAULT_BASE_URL, <<"https://api.openai.com/v1">>).
 -define(DEFAULT_TIMEOUT, 30000).
 
--doc("Returns the capabilities currently implemented by the OpenAI adapter.").
+-if(?OTP_RELEASE >= 25).
+-define(CACERTS, public_key:cacerts_get()).
+-else.
+-define(CACERTS, []).
+-endif.
+
+%% @doc Returns the capabilities currently implemented by the OpenAI adapter.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -37,7 +43,7 @@ capabilities(_Config) ->
         }
     }}.
 
--doc("Generates a normalized text response using the OpenAI Responses API.").
+%% @doc Generates a normalized text response using the OpenAI Responses API.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -61,7 +67,7 @@ generate(Request, Config) ->
             {error, #{code => invalid_request}}
     end.
 
--doc("Generates a normalized response and emits streaming events.").
+%% @doc Generates a normalized response and emits streaming events.
 -spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -469,7 +475,7 @@ send_request(Payload, ApiKey, Config) ->
         {connect_timeout, Timeout},
         {ssl, [
             {verify, verify_peer},
-            {cacerts, public_key:cacerts_get()}
+            {cacerts, ?CACERTS}
         ]}
     ],
     Request = {
@@ -512,7 +518,7 @@ send_stream_request(Payload, ApiKey, Config, Consumer) ->
         {connect_timeout, Timeout},
         {ssl, [
             {verify, verify_peer},
-            {cacerts, public_key:cacerts_get()}
+            {cacerts, ?CACERTS}
         ]}
     ],
     Request = {Url, Headers, "application/json", Body},

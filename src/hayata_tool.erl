@@ -8,7 +8,7 @@
     execute/3
 ]).
 
--doc("Validates a registry of tools and rejects invalid or duplicate definitions.").
+%% @doc Validates a registry of tools and rejects invalid or duplicate definitions.
 -spec validate_registry(term()) -> ok | {error, term()}.
 validate_registry([]) ->
     {error, empty_registry};
@@ -17,7 +17,7 @@ validate_registry(Tools) when is_list(Tools) ->
 validate_registry(_Tools) ->
     {error, invalid_registry}.
 
--doc("Returns the validated tool definitions without their handlers.").
+%% @doc Returns the validated tool definitions without their handlers.
 -spec definitions(term()) -> {ok, [map()]} | {error, term()}.
 definitions(Tools) ->
     case validate_registry(Tools) of
@@ -27,7 +27,7 @@ definitions(Tools) ->
             {error, Reason}
     end.
 
--doc("Resolves a tool by name from a validated registry.").
+%% @doc Resolves a tool by name from a validated registry.
 -spec resolve(binary(), term()) -> {ok, map()} | {error, term()}.
 resolve(Name, Tools) when is_binary(Name), byte_size(Name) > 0 ->
     case validate_registry(Tools) of
@@ -39,7 +39,7 @@ resolve(Name, Tools) when is_binary(Name), byte_size(Name) > 0 ->
 resolve(_Name, _Tools) ->
     {error, invalid_tool_name}.
 
--doc("Validates arguments and executes the selected tool handler.").
+%% @doc Validates arguments and executes the selected tool handler.
 -spec execute(binary(), term(), term()) -> term().
 execute(Name, Arguments, Tools) ->
     case resolve(Name, Tools) of

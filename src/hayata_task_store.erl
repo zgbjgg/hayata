@@ -29,7 +29,7 @@
 -type checkpoint() :: map().
 -type task_key() :: term().
 
--doc("Starts Mnesia and ensures the durable checkpoint tables exist.").
+%% @doc Starts Mnesia and ensures the durable checkpoint tables exist.
 -spec ensure_started() -> ok | {error, term()}.
 ensure_started() ->
     case ensure_mnesia_started() of
@@ -44,7 +44,7 @@ ensure_started() ->
             {error, Reason}
     end.
 
--doc("Creates an invocation checkpoint if it does not already exist.").
+%% @doc Creates an invocation checkpoint if it does not already exist.
 -spec create_invocation(term(), checkpoint()) ->
     {ok, created | existing} | {error, term()}.
 create_invocation(AgentId, Checkpoint)
@@ -69,7 +69,7 @@ create_invocation(AgentId, Checkpoint)
 create_invocation(_AgentId, _Checkpoint) ->
     {error, invalid_checkpoint}.
 
--doc("Retrieves an invocation checkpoint by agent and invocation ID.").
+%% @doc Retrieves an invocation checkpoint by agent and invocation ID.
 -spec get_invocation(term(), term()) ->
     {ok, checkpoint()} | {error, term()}.
 get_invocation(AgentId, InvocationId) ->
@@ -78,7 +78,7 @@ get_invocation(AgentId, InvocationId) ->
         {AgentId, InvocationId}
     ).
 
--doc("Persists an updated invocation checkpoint.").
+%% @doc Persists an updated invocation checkpoint.
 -spec save_invocation(checkpoint()) -> ok | {error, term()}.
 save_invocation(Checkpoint) when is_map(Checkpoint) ->
     case {maps:find(agent_id, Checkpoint),
@@ -100,14 +100,14 @@ save_invocation(Checkpoint) when is_map(Checkpoint) ->
 save_invocation(_Checkpoint) ->
     {error, invalid_checkpoint}.
 
--doc("Retrieves a task checkpoint by its stable logical key.").
+%% @doc Retrieves a task checkpoint by its stable logical key.
 -spec get_task(task_key()) ->
     {ok, checkpoint()} | {error, term()}.
 get_task(Key) ->
     transaction_get(?TASK_TABLE, Key).
 
 
--doc("Atomically claims a task or returns its persisted outcome.").
+%% @doc Atomically claims a task or returns its persisted outcome.
 -spec claim_task(term(), map()) ->
     {ok, execute | {completed, term()}}
     | {error, task_execution_uncertain}
@@ -158,7 +158,7 @@ claim_task(Key, Metadata) when is_map(Metadata) ->
 claim_task(_Key, _Metadata) ->
     {error, invalid_metadata}.
 
--doc("Persists a completed task result before notifying other processes.").
+%% @doc Persists a completed task result before notifying other processes.
 -spec save_task_result(task_key(), term()) -> ok | {error, term()}.
 save_task_result(Key, Result) ->
     Timestamp = erlang:system_time(millisecond),
@@ -189,7 +189,7 @@ save_task_result(Key, Result) ->
     mnesia:dump_log(),
     ResultTrx.
 
--doc("Retrieves the most recently updated running invocation for an agent.").
+%% @doc Retrieves the most recently updated running invocation for an agent.
 -spec get_active_invocation(term()) ->
     {ok, checkpoint()} | {error, term()}.
 get_active_invocation(AgentId) ->
@@ -220,7 +220,7 @@ get_active_invocation(AgentId) ->
             {error, Reason}
     end.
 
--doc("Classifies a persisted task without executing or modifying it.").
+%% @doc Classifies a persisted task without executing or modifying it.
 -spec inspect_task(task_key()) ->
     {ok, not_started | {completed, term()}}
     | {error, term()}.

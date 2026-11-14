@@ -2,7 +2,7 @@
 
 -export([flush/5]).
 
--doc("Sends a stream event to the invocation subscriber.").
+%% @doc Sends a stream event to the invocation subscriber.
 -spec flush(pid(), reference(), atom(), pos_integer(), map()) -> ok.
 flush(Subscriber, InvocationId, Type, Sequence, Data) ->
     Event = #{

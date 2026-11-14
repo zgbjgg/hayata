@@ -1412,11 +1412,11 @@ reducer_recovery_preserves_concurrent_edge_results_test() ->
             ok = sys:suspend(Node),
             exit(OriginalReducer, kill),
 
-            maps:foreach(
-                fun(_EdgeId, {TPid, _Pid}) ->
+            lists:foreach(
+                fun({_EdgeId, {TPid, _Pid}}) ->
                     TPid ! continue
                 end,
-                EdgePids
+                maps:to_list(EdgePids)
             ),
 
             lists:foreach(
@@ -1561,11 +1561,11 @@ reducer_recovery_processes_queued_results_before_timeout_test() ->
             )
         ),
 
-        maps:foreach(
-            fun(_EdgeId, {TaskPid, _EdgePid}) ->
+        lists:foreach(
+            fun({_EdgeId, {TaskPid, _EdgePid}}) ->
                 TaskPid ! continue
             end,
-            EdgePids
+            maps:to_list(EdgePids)
         )
     end).
 

@@ -60,7 +60,7 @@
 
 %% Public API
 
--doc("Starts a globally registered node within an agent namespace.").
+%% @doc Starts a globally registered node within an agent namespace.
 -spec start_link(
     agent_id(),
     node_id(),
@@ -78,43 +78,43 @@ start_link(AgentId, NodeId, Name, InitialState, Edges)
         []
     ).
 
--doc("Finds a node by agent ID and registered name.").
+%% @doc Finds a node by agent ID and registered name.
 -spec whereis(agent_id(), node_name()) -> pid() | undefined.
 whereis(AgentId, Name) ->
     global:whereis_name(registered_name(AgentId, Name)).
 
--doc("Returns node metadata and active edge processes.").
+%% @doc Returns node metadata and active edge processes.
 -spec get_info(gen_server:server_ref()) -> map().
 get_info(Server) ->
     gen_server:call(Server, get_info).
 
--doc("Returns the node's local state.").
+%% @doc Returns the node's local state.
 -spec get_state(gen_server:server_ref()) -> local_state().
 get_state(Server) ->
     gen_server:call(Server, get_state).
 
--doc("Replaces the node's complete local state.").
+%% @doc Replaces the node's complete local state.
 -spec replace_state(gen_server:server_ref(), local_state()) -> ok.
 replace_state(Server, NewState) when is_map(NewState) ->
     gen_server:call(Server, {replace_state, NewState}).
 
--doc("Merges updates into the node's local state.").
+%% @doc Merges updates into the node's local state.
 -spec update_state(gen_server:server_ref(), local_state()) -> ok.
 update_state(Server, Updates) when is_map(Updates) ->
     gen_server:call(Server, {update_state, Updates}).
 
--doc("Replaces the node's outgoing edge definitions.").
+%% @doc Replaces the node's outgoing edge definitions.
 -spec set_edges(gen_server:server_ref(), edge_definitions()) -> ok.
 set_edges(Server, Edges) when is_list(Edges) ->
     gen_server:call(Server, {set_edges, Edges}).
 
--doc("Registers and monitors an active edge process.").
+%% @doc Registers and monitors an active edge process.
 -spec track_edge(gen_server:server_ref(), edge_id(), pid()) ->
     {ok, reference()} | {error, term()}.
 track_edge(Server, EdgeId, EdgePid) when is_pid(EdgePid) ->
     gen_server:call(Server, {track_edge, EdgeId, EdgePid}).
 
--doc("Starts, monitors, registers, and asynchronously executes an edge.").
+%% @doc Starts, monitors, registers, and asynchronously executes an edge.
 -spec start_edge(
     gen_server:server_ref(),
     edge_id(),
@@ -127,7 +127,7 @@ start_edge(Node, EdgeId, ExecutionId, TaskFun) ->
         {start_edge, EdgeId, ExecutionId, TaskFun}
     ).
 
--doc("Starts an asynchronous execution across multiple edges.").
+%% @doc Starts an asynchronous execution across multiple edges.
 -spec start_execution(
     gen_server:server_ref(),
     term(),
@@ -140,7 +140,7 @@ start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs) ->
         {start_execution, ExecutionId, EdgeTasks, TimeoutMs}
     ).
 
--doc("Starts an asynchronous execution and notifies a recipient when it terminates.").
+%% @doc Starts an asynchronous execution and notifies a recipient when it terminates.
 -spec start_execution(
     gen_server:server_ref(),
     term(),
@@ -155,7 +155,7 @@ start_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid)
         {start_execution, ExecutionId, EdgeTasks, TimeoutMs, RecipientPid}
     ).
 
--doc("Starts an asynchronous execution with an explicit execution type and recipient.").
+%% @doc Starts an asynchronous execution with an explicit execution type and recipient.
 -spec start_execution(
     gen_server:server_ref(),
     term(),
@@ -184,13 +184,13 @@ start_execution(
         }
     ).
 
--doc("Cancels an active execution and its associated processes.").
+%% @doc Cancels an active execution and its associated processes.
 -spec cancel_execution(gen_server:server_ref(), term()) ->
     ok | {error, term()}.
 cancel_execution(Node, ExecutionId) ->
     gen_server:call(Node, {cancel_execution, ExecutionId}).
 
--doc("Recovers an execution and notifies a recipient of its result.").
+%% @doc Recovers an execution and notifies a recipient of its result.
 -spec recover_execution(
     gen_server:server_ref(),
     term(),
@@ -213,7 +213,7 @@ recover_execution(Node, ExecutionId, EdgeTasks, TimeoutMs, Type, RecipientPid) w
     ).
 %% gen_server callbacks
 
--doc(false).
+%% Internal function (not documented).
 -spec init({
     agent_id(),
     node_id(),
@@ -230,7 +230,7 @@ init({AgentId, NodeId, Name, InitialState, Edges}) ->
         edges = Edges
     }}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_call(term(), gen_server:from(), #node_state{}) ->
     {reply, term(), #node_state{}}.
 handle_call(get_info, _From, State) ->
@@ -357,13 +357,13 @@ handle_call({recover_execution, ExecutionId, EdgeTasks, TimeoutMs, Type, Recipie
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_cast(term(), #node_state{}) ->
     {noreply, #node_state{}}.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_info(term(), #node_state{}) ->
     {noreply, #node_state{}}.
 handle_info({hayata_edge_result, EdgeId, ExecutionId, Result}, State) ->
@@ -427,7 +427,7 @@ handle_info({'DOWN', MonitorRef, process, EdgePid, Reason}, State) ->
 handle_info(_Info, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec terminate(term(), #node_state{}) -> ok.
 terminate(_Reason, State) ->
     stop_active_processes(
@@ -438,7 +438,7 @@ terminate(_Reason, State) ->
     ),
     ok.
 
--doc(false).
+%% Internal function (not documented).
 -spec code_change(term(), #node_state{}, term()) ->
     {ok, #node_state{}}.
 code_change(_OldVersion, State, _Extra) ->
