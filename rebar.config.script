@@ -1,0 +1,35 @@
+OtpVersion = list_to_integer(erlang:system_info(otp_release)),
+
+%% Existing dependencies
+Deps0 = proplists:get_value(deps, CONFIG, []),
+
+%% Select JSX only for OTP < 27
+Deps1 =
+    case OtpVersion >= 27 of
+        true ->
+            lists:keydelete(jsx, 1, Deps0);
+
+        false ->
+            lists:keystore(jsx, 1, Deps0, {jsx, "~> 3.1"})
+    end,
+
+%% Preserve existing source directories
+SrcDirs0 = proplists:get_value(src_dirs, CONFIG, ["src"]),
+
+%% Select compatibility module only for OTP < 27
+SrcDirs1 =
+    case OtpVersion >= 27 of
+        true ->
+            lists:delete("compat", SrcDirs0);
+
+        false ->
+            SrcDirs0 ++
+                case lists:member("compat", SrcDirs0) of
+                    true -> [];
+                    false -> ["compat"]
+                end
+    end,
+
+Config1 = lists:keystore(deps, 1, CONFIG, {deps, Deps1}),
+
+lists:keystore(src_dirs, 1, Config1, {src_dirs, SrcDirs1}).
