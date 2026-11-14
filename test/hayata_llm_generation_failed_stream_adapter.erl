@@ -9,20 +9,20 @@
     generate_stream/3
 ]).
 
--doc("Returns the mock adapter capabilities.").
+%% @doc Returns the mock adapter capabilities.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()}.
 capabilities(Config) ->
     hayata_llm_adapter_mock:capabilities(Config).
 
--doc("Returns the mock adapter response.").
+%% @doc Returns the mock adapter response.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 generate(Request, Config) ->
     hayata_llm_adapter_mock:generate(Request, Config).
 
--doc("Emits a generation failure and returns the normalized error.").
+%% @doc Emits a generation failure and returns the normalized error.
 -spec generate_stream(
     map(),
     map(),

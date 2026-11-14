@@ -39,17 +39,17 @@
     errors => map()
 }.
 
--doc("Starts an unlinked reducer for a single execution.").
+%% @doc Starts an unlinked reducer for a single execution.
 -spec start(config()) -> gen_server:start_ret().
 start(Config) when is_map(Config) ->
     gen_server:start(?MODULE, Config, []).
 
--doc("Activates the reducer and confirms that it is ready.").
+%% @doc Activates the reducer and confirms that it is ready.
 -spec activate(gen_server:server_ref()) -> ok.
 activate(Reducer) ->
     gen_server:call(Reducer, activate).
 
--doc(false).
+%% Internal function (not documented).
 -spec init(config()) ->
     {ok, #reducer_state{}, {continue, evaluate}} |
     {stop, term()}.
@@ -71,7 +71,7 @@ init(Config) ->
             {stop, Reason}
     end.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_call(term(), gen_server:from(), #reducer_state{}) ->
     {reply, {error, unsupported_request}, #reducer_state{}}.
 handle_call(activate, _From, State = #reducer_state{execution_id = ExecutionId, activated = false, timeout_ms = TimeoutMs}) ->
@@ -98,13 +98,13 @@ handle_call(activate, _From, State) ->
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_cast(term(), #reducer_state{}) ->
     {noreply, #reducer_state{}}.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_info(term(), #reducer_state{}) ->
     {noreply, #reducer_state{}} |
     {stop, normal, #reducer_state{}}.
@@ -139,12 +139,12 @@ handle_info({hayata_reducer_activate, ExecutionId}, State = #reducer_state{execu
 handle_info(_Info, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec terminate(term(), #reducer_state{}) -> ok.
 terminate(_Reason, _State) ->
     ok.
 
--doc(false).
+%% Internal function (not documented).
 -spec code_change(term(), #reducer_state{}, term()) ->
     {ok, #reducer_state{}}.
 code_change(_OldVersion, State, _Extra) ->

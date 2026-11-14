@@ -18,12 +18,12 @@
 
 -define(SERVER, ?MODULE).
 
--doc("Starts the top-level Hayata supervisor.").
+%% @doc Starts the top-level Hayata supervisor.
 -spec start_link() -> supervisor:start_ret().
 start_link() ->
     supervisor:start_link({local, ?SERVER}, ?MODULE, []).
 
--doc("Starts an agent under the top-level supervisor.").
+%% @doc Starts an agent under the top-level supervisor.
 -spec start_agent(map()) -> {ok, pid()} | {error, term()}.
 start_agent(Config) when is_map(Config) ->
     case whereis(?SERVER) of
@@ -43,7 +43,7 @@ start_agent(Config) when is_map(Config) ->
 start_agent(_Config) ->
     {error, invalid_config}.
 
--doc("Stops an agent supervision tree managed by Hayata.").
+%% @doc Stops an agent supervision tree managed by Hayata.
 -spec stop_agent(pid()) -> ok | {error, term()}.
 stop_agent(AgentSupPid) when is_pid(AgentSupPid) ->
     case whereis(?SERVER) of
@@ -64,7 +64,7 @@ stop_agent(AgentSupPid) when is_pid(AgentSupPid) ->
 stop_agent(_AgentSupPid) ->
     {error, invalid_agent_supervisor}.
 
--doc("Returns the agents managed by the top-level supervisor.").
+%% @doc Returns the agents managed by the top-level supervisor.
 -spec agents() ->
     [{term(), pid() | restarting, supervisor, [module()]}]
     | {error, not_started}.
@@ -77,7 +77,7 @@ agents() ->
     end.
 
 
--doc(false).
+%% Internal function (not documented).
 -spec init([]) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}
     | {stop, term()}.

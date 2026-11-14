@@ -61,18 +61,18 @@
     conversation_memory => boolean()
 }.
 
--doc("Starts an agent coordinator.").
+%% @doc Starts an agent coordinator.
 -spec start_link(config()) -> gen_server:start_ret().
 start_link(Config) ->
     gen_server:start_link(?MODULE, Config, []).
 
--doc("Starts an asynchronous agent invocation.").
+%% @doc Starts an asynchronous agent invocation.
 -spec run(gen_server:server_ref(), term()) ->
     {ok, reference()} | {error, term()}.
 run(Agent, Input) ->
     gen_server:call(Agent, {run, Input, undefined, false}, 5000).
 
--doc("Starts an asynchronous agent invocation with subscription options.").
+%% @doc Starts an asynchronous agent invocation with subscription options.
 -spec run(gen_server:server_ref(), term(), map()) ->
     {ok, reference()} | {error, term()}.
 run(Agent, Input, Options) when is_map(Options) ->
@@ -89,23 +89,23 @@ run(Agent, Input, Options) when is_map(Options) ->
 run(_Agent, _Input, _Options) ->
     {error, invalid_run_options}.
 
--doc("Returns the current agent context.").
+%% @doc Returns the current agent context.
 -spec get_state(gen_server:server_ref()) -> map().
 get_state(Agent) ->
     gen_server:call(Agent, get_state).
 
--doc("Returns operational information about the agent.").
+%% @doc Returns operational information about the agent.
 -spec get_info(gen_server:server_ref()) -> map().
 get_info(Agent) ->
     gen_server:call(Agent, get_info).
 
--doc("Returns the final result, if available.").
+%% @doc Returns the final result, if available.
 -spec get_result(gen_server:server_ref()) ->
     {ok, term()} | {error, term()}.
 get_result(Agent) ->
     gen_server:call(Agent, get_result).
 
--doc("Stops the agent and its complete supervision tree.").
+%% @doc Stops the agent and its complete supervision tree.
 -spec stop(gen_server:server_ref()) -> ok | {error, term()}.
 stop(Agent) ->
     case gen_server:call(Agent, get_supervisor_pid) of
@@ -115,13 +115,13 @@ stop(Agent) ->
             {error, Reason}
     end.
 
--doc("Resumes recovery of a persisted individual node execution.").
+%% @doc Resumes recovery of a persisted individual node execution.
 -spec recover(gen_server:server_ref()) ->
     {ok, reference()} | {error, term()}.
 recover(Agent) ->
     gen_server:call(Agent, recover, 5000).
 
--doc(false).
+%% Internal function (not documented).
 -spec init(config()) -> {ok, #agent_state{}} | {stop, term()}.
 init(Config) ->
     case validate_config(Config) of
@@ -155,7 +155,7 @@ init(Config) ->
             {stop, Reason}
     end.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_call(term(), gen_server:from(), #agent_state{}) ->
     {reply, term(), #agent_state{}} |
     {stop, term(), term(), #agent_state{}}.
@@ -323,12 +323,12 @@ handle_call(
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_cast(term(), #agent_state{}) -> {noreply, #agent_state{}}.
 handle_cast(_Request, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_info(term(), #agent_state{}) ->
     {noreply, #agent_state{}}.
 handle_info(
@@ -434,12 +434,12 @@ handle_info({invocation_timeout, InvocationId}, #agent_state{status = running, i
 handle_info(_Info, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec terminate(term(), #agent_state{}) -> ok.
 terminate(_Reason, _State) ->
     ok.
 
--doc(false).
+%% Internal function (not documented).
 -spec code_change(term(), #agent_state{}, term()) ->
     {ok, #agent_state{}}.
 code_change(_OldVersion, State, _Extra) ->

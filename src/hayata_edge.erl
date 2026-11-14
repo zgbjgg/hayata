@@ -36,14 +36,14 @@
 -type task_context() :: #{parent := pid()}.
 -type task_fun() :: fun((task_context()) -> task_result()).
 
--doc("Starts an anonymous, linked edge process.").
+%% @doc Starts an anonymous, linked edge process.
 -spec start(pid(), edge_id(), execution_id(), task_fun()) ->
     gen_server:start_ret().
 start(NodePid, EdgeId, ExecutionId, TaskFun)
         when is_pid(NodePid), is_function(TaskFun, 1) ->
     start(NodePid, undefined, EdgeId, ExecutionId, TaskFun).
 
--doc("Starts an anonymous edge process with a result reducer.").
+%% @doc Starts an anonymous edge process with a result reducer.
 -spec start(pid(), pid() | undefined, edge_id(), execution_id(), task_fun()) ->
     gen_server:start_ret().
 start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun)
@@ -59,7 +59,7 @@ start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun)
         #{}
     ).
 
--doc("Starts an edge with persistent task metadata.").
+%% @doc Starts an edge with persistent task metadata.
 -spec start(
     pid(),
     pid() | undefined,
@@ -86,12 +86,12 @@ start(NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun, Metadata)
         []
     ).
 
--doc("Starts execution of an edge process.").
+%% @doc Starts execution of an edge process.
 -spec execute(pid()) -> ok.
 execute(EdgePid) ->
     gen_server:cast(EdgePid, start).
 
--doc(false).
+%% Internal function (not documented).
 -spec init({
     pid(),
     pid() | undefined,
@@ -114,13 +114,13 @@ init({NodePid, ReducerPid, EdgeId, ExecutionId, TaskFun, Metadata}) ->
         metadata = Metadata
     }}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_call(term(), gen_server:from(), #edge_state{}) ->
     {reply, term(), #edge_state{}}.
 handle_call(_Request, _From, State) ->
     {reply, {error, unsupported_request}, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_cast(term(), #edge_state{}) ->
     {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
 handle_cast(start, #edge_state{started_at = undefined} = State) ->
@@ -142,7 +142,7 @@ handle_cast(start, State) ->
 handle_cast(_Request, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec handle_info(term(), #edge_state{}) ->
     {noreply, #edge_state{}} | {stop, term(), #edge_state{}}.
 handle_info({task_result, WorkerPid, Result}, #edge_state{worker_pid = WorkerPid} = State) when is_pid(WorkerPid) ->
@@ -155,12 +155,12 @@ handle_info({'EXIT', WorkerPid, Reason}, #edge_state{worker_pid = WorkerPid} = S
 handle_info(_Info, State) ->
     {noreply, State}.
 
--doc(false).
+%% Internal function (not documented).
 -spec terminate(term(), #edge_state{}) -> ok.
 terminate(_Reason, _State) ->
     ok.
 
--doc(false).
+%% Internal function (not documented).
 -spec code_change(term(), #edge_state{}, term()) ->
     {ok, #edge_state{}}.
 code_change(_OldVersion, State, _Extra) ->

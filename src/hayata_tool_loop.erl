@@ -4,7 +4,7 @@
     run/4
 ]).
 
--doc("Runs an LLM interaction loop with controlled tool execution.").
+%% @doc Runs an LLM interaction loop with controlled tool execution.
 -spec run(function(), map(), list(), pos_integer()) ->
     {ok, map()} | {error, term()}.
 run(_LLM, _Request, _Tools, MaxIterations)

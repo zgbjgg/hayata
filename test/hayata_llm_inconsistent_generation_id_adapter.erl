@@ -5,20 +5,20 @@
 
 -export([capabilities/1, generate/2, generate_stream/3]).
 
--doc("Returns the capabilities supported by the mock adapter.").
+%% @doc Returns the capabilities supported by the mock adapter.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()}.
 capabilities(Config) ->
     hayata_llm_adapter_mock:capabilities(Config).
 
--doc("Delegates regular generation to the mock adapter.").
+%% @doc Delegates regular generation to the mock adapter.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 generate(Request, Config) ->
     hayata_llm_adapter_mock:generate(Request, Config).
 
--doc("Emits events with inconsistent generation identifiers.").
+%% @doc Emits events with inconsistent generation identifiers.
 -spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.

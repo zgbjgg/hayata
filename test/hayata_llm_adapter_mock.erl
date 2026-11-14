@@ -9,7 +9,7 @@
     generate_stream/3
 ]).
 
--doc("Returns the capabilities supported by the mock adapter.").
+%% @doc Returns the capabilities supported by the mock adapter.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()}.
 capabilities(_Config) ->
@@ -26,7 +26,7 @@ capabilities(_Config) ->
         }
     }}.
 
--doc("Returns a deterministic normalized response for a valid request.").
+%% @doc Returns a deterministic normalized response for a valid request.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
@@ -45,7 +45,7 @@ generate(Request, Config) when is_map(Request) ->
 generate(_Request, _Config) ->
     {error, #{code => invalid_request}}.
 
--doc("Emits deterministic stream events and returns the final response.").
+%% @doc Emits deterministic stream events and returns the final response.
 -spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.

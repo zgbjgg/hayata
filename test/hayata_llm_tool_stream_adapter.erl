@@ -7,20 +7,20 @@
 
 -define(GENERATION_ID, <<"tool-stream-test">>).
 
--doc("Returns the capabilities supported by the mock adapter.").
+%% @doc Returns the capabilities supported by the mock adapter.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()}.
 capabilities(Config) ->
     hayata_llm_adapter_mock:capabilities(Config).
 
--doc("Returns a normalized response containing a tool call.").
+%% @doc Returns a normalized response containing a tool call.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 generate(_Request, _Config) ->
     {ok, response()}.
 
--doc("Emits tool-call lifecycle events and returns the normalized response.").
+%% @doc Emits tool-call lifecycle events and returns the normalized response.
 -spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.

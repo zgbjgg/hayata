@@ -13,12 +13,12 @@
 -type node_id() :: atom() | string().
 -type node_state() :: map().
 
--doc("Starts a node supervisor for an agent.").
+%% @doc Starts a node supervisor for an agent.
 -spec start_link(agent_id()) -> supervisor:start_ret().
 start_link(AgentId) ->
     supervisor:start_link(?MODULE, AgentId).
 
--doc("Starts a node process under the agent's node supervisor.").
+%% @doc Starts a node process under the agent's node supervisor.
 -spec start_node(
     pid(),
     node_id(),
@@ -45,7 +45,7 @@ start_node(SupPid, NodeId, InitialState, Edges, AgentId)
     },
     supervisor:start_child(SupPid, ChildSpec).
 
--doc("Stops a node process managed by this supervisor.").
+%% @doc Stops a node process managed by this supervisor.
 -spec stop_node(pid(), node_id()) -> ok | {error, term()}.
 stop_node(SupPid, NodeId) when is_pid(SupPid) ->
     ChildId = {hayata_node, NodeId},
@@ -56,7 +56,7 @@ stop_node(SupPid, NodeId) when is_pid(SupPid) ->
             {error, Reason}
     end.
 
--doc(false).
+%% Internal function (not documented).
 -spec init(agent_id()) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init(_AgentId) ->

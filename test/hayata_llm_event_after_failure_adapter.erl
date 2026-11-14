@@ -7,20 +7,20 @@
 
 -define(GENERATION_ID, <<"event-after-failure-test">>).
 
--doc("Returns the capabilities supported by the mock adapter.").
+%% @doc Returns the capabilities supported by the mock adapter.
 -spec capabilities(map()) ->
     {ok, hayata_llm_adapter:capabilities()}.
 capabilities(Config) ->
     hayata_llm_adapter_mock:capabilities(Config).
 
--doc("Delegates regular generation to the mock adapter.").
+%% @doc Delegates regular generation to the mock adapter.
 -spec generate(map(), map()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.
 generate(Request, Config) ->
     hayata_llm_adapter_mock:generate(Request, Config).
 
--doc("Attempts to emit a content event after a terminal failure event.").
+%% @doc Attempts to emit a content event after a terminal failure event.
 -spec generate_stream(map(), map(), hayata_llm_adapter:consumer()) ->
     {ok, hayata_llm_adapter:response()} |
     {error, hayata_llm_adapter:normalized_error()}.

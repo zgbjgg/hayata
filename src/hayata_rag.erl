@@ -38,7 +38,7 @@
 
 -type rag_function() :: fun((binary(), options()) -> result()).
 
--doc("Creates a RAG retrieval function from the supplied retriever configuration.").
+%% @doc Creates a RAG retrieval function from the supplied retriever configuration.
 -spec new(term()) -> {ok, rag_function()} | {error, invalid_config}.
 new(Config) ->
     case validate_config(Config) of
@@ -52,7 +52,7 @@ new(Config) ->
             {error, invalid_config}
     end.
 
--doc("Validates a RAG retriever configuration.").
+%% @doc Validates a RAG retriever configuration.
 -spec validate_config(term()) -> ok | {error, invalid_config}.
 validate_config(#{retrieve := Retrieve}) ->
     case validate_retriever(Retrieve) of
@@ -64,7 +64,7 @@ validate_config(#{retrieve := Retrieve}) ->
 validate_config(_Config) ->
     {error, invalid_config}.
 
--doc("Validates and normalizes a retriever result.").
+%% @doc Validates and normalizes a retriever result.
 -spec validate_result(term()) -> result().
 validate_result({ok, #{documents := Documents}})
         when is_list(Documents) ->

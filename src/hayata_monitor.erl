@@ -2,7 +2,7 @@
 
 -export([start/2]).
 
--doc("Start monitor node and edge processes to check if terminate.").
+%% @doc Start monitor node and edge processes to check if terminate.
 -spec start(pid(), pid()) -> ok.
 start(NodePid, EdgePid) ->
     spawn(fun() -> monitor_processes(NodePid, EdgePid) end),

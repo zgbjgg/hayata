@@ -20,7 +20,7 @@
     nodes := #{term() => function()}
 }.
 
--doc("Starts the supervision tree for one agent.").
+%% @doc Starts the supervision tree for one agent.
 -spec start_link(config()) -> supervisor:startchild_ret().
 start_link(Config) ->
     case validate_config(Config) of
@@ -47,7 +47,7 @@ start_link(Config) ->
             {error, Reason}
     end.
 
--doc("Returns the PID of the agent coordinator.").
+%% @doc Returns the PID of the agent coordinator.
 -spec agent(pid()) -> {ok, pid()} | {error, term()}.
 agent(SupPid) ->
     case lists:keyfind(
@@ -62,7 +62,7 @@ agent(SupPid) ->
             {error, agent_not_found}
     end.
 
--doc("Returns the PID of the agent's node supervisor.").
+%% @doc Returns the PID of the agent's node supervisor.
 -spec node_supervisor(pid()) -> {ok, pid()} | {error, term()}.
 node_supervisor(SupPid) ->
     case lists:keyfind(
@@ -77,7 +77,7 @@ node_supervisor(SupPid) ->
             {error, node_supervisor_not_found}
     end.
 
--doc(false).
+%% Internal function (not documented).
 -spec init(config()) ->
     {ok, {supervisor:sup_flags(), [supervisor:child_spec()]}}.
 init(Config) ->
@@ -209,7 +209,7 @@ start_agent(SupPid, Config) ->
             {error, Reason}
     end.
 
--doc(false).
+%% Internal function (not documented).
 -spec validate_llm_config(map()) -> ok | {error, term()}.
 validate_llm_config(Config) ->
     case maps:find(llm, Config) of
