@@ -5,6 +5,12 @@ defmodule Hayata.Agent do
   Each agent runs in its own Erlang/OTP supervision tree.
   """
 
+  defmacro __using__(_options) do
+    quote do
+      import Hayata.Agent.DSL, only: [agent: 1]
+    end
+  end
+
   @type config :: %{
           required(:id) => term(),
           required(:nodes) => %{optional(term()) => function()},
