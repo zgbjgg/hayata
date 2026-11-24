@@ -1,0 +1,122 @@
+defmodule Hayata.AgentDSLTest do
+  use ExUnit.Case, async: true
+
+  defmodule TestAgent do
+    use Hayata.Agent
+
+    agent do
+      id "dsl_test_agent"
+
+      state %{
+        messages: []
+      }
+
+      node "answer" do
+        context ->
+          %{
+            answer: "Hello from DSL",
+            received_input: context.input
+          }
+      end
+
+      decision do
+        on_step 0 do
+          next "answer", input: :input
+        end
+
+        on_step 1 do
+          finish :state
+        end
+      end
+
+      max_steps 5
+      execution_timeout 5_000
+    end
+  end
+
+  test "generates the expected agent configuration" do
+    config = TestAgent.config()
+
+    assert config.id == "dsl_test_agent"
+    assert config.state == %{messages: []}
+    assert config.max_steps == 5
+    assert config.execution_timeout == 5_000
+    assert Map.has_key?(config.nodes, :answer)
+    assert is_function(config.decision_policy, 1)
+  end
+
+  test "generates atom node identifiers" do
+    config = TestAgent.config()
+
+    assert Map.keys(config.nodes) == [:answer]
+  end
+
+  test "generates a working decision policy" do
+    config = TestAgent.config()
+
+    first_decision =
+      config.decision_policy.(%{
+        step: 0,
+        input: "test input"
+      })
+
+    assert first_decision == {:next, :answer, "test input"}
+
+    second_decision =
+      config.decision_policy.(%{
+        step: 1,
+        state: %{answer: "done"}
+      })
+
+    assert second_decision == {:finish, %{answer: "done"}}
+  end
+
+  test "generates an OTP child specification" do
+    child_spec = TestAgent.child_spec([])
+
+    assert child_spec.id == "dsl_test_agent"
+    assert child_spec.type == :supervisor
+    assert child_spec.restart == :permanent
+  end
+
+  test "starts and executes an agent defined with the DSL" do
+    {:ok, supervisor_pid} =
+      Supervisor.start_link(
+        [TestAgent],
+        strategy: :one_for_one
+      )
+
+    [{_id, agent_sup_pid, :supervisor, _modules}] =
+      Supervisor.which_children(supervisor_pid)
+
+    assert {:ok, _invocation_id} =
+             Hayata.Agent.run(agent_sup_pid, "DSL input")
+
+    result = await_result(agent_sup_pid)
+
+    assert result == %{
+             answer: "Hello from DSL",
+             received_input: "DSL input",
+             messages: []
+           }
+
+    assert :ok == Supervisor.stop(supervisor_pid)
+  end
+
+  defp await_result(agent_sup_pid, attempts \\ 20)
+
+  defp await_result(agent_sup_pid, 0) do
+    Hayata.Agent.result(agent_sup_pid)
+  end
+
+  defp await_result(agent_sup_pid, attempts) do
+    case Hayata.Agent.result(agent_sup_pid) do
+      {:ok, result} ->
+        result
+
+      {:error, _reason} ->
+        Process.sleep(25)
+        await_result(agent_sup_pid, attempts - 1)
+    end
+  end
+end
