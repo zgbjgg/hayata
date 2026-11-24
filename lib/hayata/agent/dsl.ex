@@ -161,6 +161,29 @@ defmodule Hayata.Agent.DSL do
           "node identifier must be a string literal, got: #{Macro.to_string(name)}"
   end
 
+  defp parse_node_ids([]) do
+    raise ArgumentError,
+          "parallel requires at least one node identifier"
+  end
+
+  defp parse_node_ids(names) when is_list(names) do
+    node_ids = Enum.map(names, &parse_node_id/1)
+
+    case length(node_ids) == MapSet.size(MapSet.new(node_ids)) do
+      true ->
+        node_ids
+
+      false ->
+        raise ArgumentError,
+              "parallel contains duplicated node identifiers"
+    end
+  end
+
+  defp parse_node_ids(names) do
+    raise ArgumentError,
+          "parallel node identifiers must be a list of string literals, got: #{Macro.to_string(names)}"
+  end
+
   defp build_node_function([{:->, _metadata, _clauses} = clause]) do
     {:fn, [], [clause]}
   end
@@ -193,6 +216,18 @@ defmodule Hayata.Agent.DSL do
   defp parse_decision_step(expression) do
     raise ArgumentError,
           "invalid decision step: #{Macro.to_string(expression)}"
+  end
+
+  defp parse_decision_result(
+         {:parallel, _metadata, [names, options]}
+       )
+       when is_list(options) do
+    node_ids = parse_node_ids(names)
+    input = Keyword.fetch!(options, :input)
+
+    quote do
+      {:next, unquote(node_ids), unquote(context_value(input))}
+    end
   end
 
   defp parse_decision_result(

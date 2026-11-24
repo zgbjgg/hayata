@@ -34,6 +34,45 @@ defmodule Hayata.AgentDSLTest do
     end
   end
 
+  defmodule ParallelTestAgent do
+    use Hayata.Agent
+
+    agent do
+      id "dsl_parallel_test_agent"
+
+      state %{
+        messages: []
+      }
+
+      node "research" do
+        context ->
+          %{
+            research: "Research: #{context.input}"
+          }
+      end
+
+      node "analysis" do
+        context ->
+          %{
+            analysis: "Analysis: #{context.input}"
+          }
+      end
+
+      decision do
+        on_step 0 do
+          parallel ["research", "analysis"], input: :input
+        end
+
+        on_step 2 do
+          finish :parallel_results
+        end
+      end
+
+      max_steps 5
+      execution_timeout 5_000
+    end
+  end
+
   test "generates the expected agent configuration" do
     config = TestAgent.config()
 
@@ -99,6 +138,45 @@ defmodule Hayata.AgentDSLTest do
              received_input: "DSL input",
              messages: []
            }
+
+    assert :ok == Supervisor.stop(supervisor_pid)
+  end
+
+  test "generates a parallel decision with ordered node identifiers" do
+    config = ParallelTestAgent.config()
+
+    decision =
+      config.decision_policy.(%{
+        step: 0,
+        input: "test input"
+      })
+
+    assert decision == {
+             :next,
+             [:research, :analysis],
+             "test input"
+           }
+  end
+
+  test "starts and executes parallel nodes defined with the DSL" do
+    {:ok, supervisor_pid} =
+      Supervisor.start_link(
+        [ParallelTestAgent],
+        strategy: :one_for_one
+      )
+
+    [{_id, agent_sup_pid, :supervisor, _modules}] =
+      Supervisor.which_children(supervisor_pid)
+
+    assert {:ok, _invocation_id} =
+             Hayata.Agent.run(agent_sup_pid, "DSL input")
+
+    result = await_result(agent_sup_pid)
+
+    assert result == [
+             %{research: "Research: DSL input"},
+             %{analysis: "Analysis: DSL input"}
+           ]
 
     assert :ok == Supervisor.stop(supervisor_pid)
   end
