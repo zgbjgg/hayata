@@ -133,6 +133,28 @@ defmodule Hayata.AgentDSLTest do
     end
   end
 
+  defmodule ExplicitNodeContextTestAgent do
+    use Hayata.Agent
+
+    agent do
+      id "explicit_context_test_agent"
+
+      node "answer", context do
+        %{answer: context.input}
+      end
+
+      decision do
+        on_step 0, context do
+          next "answer", input: context.input
+        end
+
+        on_step 1, context do
+          finish context.state
+        end
+      end
+    end
+  end
+
   test "generates the expected agent configuration" do
     config = TestAgent.config()
 
@@ -282,6 +304,19 @@ defmodule Hayata.AgentDSLTest do
       })
 
     assert second_decision == {:finish, state}
+  end
+
+  test "supports explicit context variables in node definitions" do
+    config = ExplicitNodeContextTestAgent.config()
+
+    node_result =
+      config.nodes.answer.(%{
+        input: "input from explicit context"
+      })
+
+    assert node_result == %{
+             answer: "input from explicit context"
+           }
   end
 
   defp await_result(agent_sup_pid, attempts \\ 20)

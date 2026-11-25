@@ -97,6 +97,32 @@ defmodule Hayata.Agent.DSL do
     Map.put(definition, :rag_config, value)
   end
 
+  # Explicit context syntax:
+  # node "answer", context do
+  #   %{answer: context.input}
+  # end
+  defp parse_agent_expression(
+         {:node, _metadata, [name, {variable, _variable_metadata, nil}, [do: body]]},
+         definition
+       )
+       when is_atom(variable) do
+    node_id = parse_node_id(name)
+
+    node = %{
+      id: node_id,
+      function: build_node_function(body, {variable, [], nil})
+    }
+
+    nodes = [node | definition.nodes]
+
+    Map.put(definition, :nodes, nodes)
+  end
+
+  # Legacy syntax:
+  # node "answer" do
+  #   context ->
+  #     %{answer: context.input}
+  # end
   defp parse_agent_expression(
          {:node, _metadata, [name, [do: body]]},
          definition
@@ -213,6 +239,12 @@ defmodule Hayata.Agent.DSL do
   defp build_node_function(body) do
     raise ArgumentError,
           "node body must be an anonymous function, got: #{Macro.to_string(body)}"
+  end
+
+  defp build_node_function(body, context_variable) do
+    clause = {:->, [], [[context_variable], body]}
+
+    {:fn, [], [clause]}
   end
 
   defp parse_decision_block(block) do
