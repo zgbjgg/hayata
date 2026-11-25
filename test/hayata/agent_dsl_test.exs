@@ -5,11 +5,11 @@ defmodule Hayata.AgentDSLTest do
     use Hayata.Agent
 
     agent do
-      id "dsl_test_agent"
+      id("dsl_test_agent")
 
-      state %{
+      state(%{
         messages: []
-      }
+      })
 
       node "answer" do
         context ->
@@ -21,16 +21,16 @@ defmodule Hayata.AgentDSLTest do
 
       decision do
         on_step 0 do
-          next "answer", input: :input
+          next("answer", input: :input)
         end
 
         on_step 1 do
-          finish :state
+          finish(:state)
         end
       end
 
-      max_steps 5
-      execution_timeout 5_000
+      max_steps(5)
+      execution_timeout(5_000)
     end
   end
 
@@ -38,11 +38,11 @@ defmodule Hayata.AgentDSLTest do
     use Hayata.Agent
 
     agent do
-      id "dsl_parallel_test_agent"
+      id("dsl_parallel_test_agent")
 
-      state %{
+      state(%{
         messages: []
-      }
+      })
 
       node "research" do
         context ->
@@ -60,16 +60,16 @@ defmodule Hayata.AgentDSLTest do
 
       decision do
         on_step 0 do
-          parallel ["research", "analysis"], input: :input
+          parallel(["research", "analysis"], input: :input)
         end
 
         on_step 2 do
-          finish :parallel_results
+          finish(:parallel_results)
         end
       end
 
-      max_steps 5
-      execution_timeout 5_000
+      max_steps(5)
+      execution_timeout(5_000)
     end
   end
 
@@ -77,20 +77,20 @@ defmodule Hayata.AgentDSLTest do
     use Hayata.Agent
 
     agent do
-      id "configured_test_agent"
+      id("configured_test_agent")
 
-      llm %{
+      llm(%{
         adapter: :test_adapter,
         model: "test-model"
-      }
+      })
 
-      conversation_memory true
+      conversation_memory(true)
 
-      rag_config %{
+      rag_config(%{
         retrieve: fn _query, _options ->
           {:ok, %{documents: []}}
         end
-      }
+      })
 
       node "answer" do
         context ->
@@ -99,22 +99,21 @@ defmodule Hayata.AgentDSLTest do
 
       decision do
         on_step 0 do
-          next "answer", input: :input
+          next("answer", input: :input)
         end
 
         on_step 1 do
-          finish :state
+          finish(:state)
         end
       end
     end
   end
 
-
   defmodule ExplicitContextTestAgent do
     use Hayata.Agent
 
     agent do
-      id "explicit_context_test_agent"
+      id("explicit_context_test_agent")
 
       node "answer" do
         context ->
@@ -123,11 +122,11 @@ defmodule Hayata.AgentDSLTest do
 
       decision do
         on_step 0, context do
-          next "answer", input: context.input
+          next("answer", input: context.input)
         end
 
         on_step 1, context do
-          finish context.state
+          finish(context.state)
         end
       end
     end
@@ -137,7 +136,7 @@ defmodule Hayata.AgentDSLTest do
     use Hayata.Agent
 
     agent do
-      id "explicit_context_test_agent"
+      id("explicit_context_test_agent")
 
       node "answer", context do
         %{answer: context.input}
@@ -145,11 +144,37 @@ defmodule Hayata.AgentDSLTest do
 
       decision do
         on_step 0, context do
-          next "answer", input: context.input
+          next("answer", input: context.input)
         end
 
         on_step 1, context do
-          finish context.state
+          finish(context.state)
+        end
+      end
+    end
+  end
+
+  defmodule PatternMatchingDecisionTestAgent do
+    use Hayata.Agent
+
+    agent do
+      id("pattern_matching_decision_test_agent")
+
+      state(%{
+        status: :pending
+      })
+
+      node "process", context do
+        %{processed: context.input}
+      end
+
+      decision do
+        on_step _, %{state: %{status: :pending}} = context do
+          next("process", input: context.input)
+        end
+
+        on_step _, %{state: %{status: :completed}} = context do
+          finish(context.state)
         end
       end
     end
@@ -207,11 +232,9 @@ defmodule Hayata.AgentDSLTest do
         strategy: :one_for_one
       )
 
-    [{_id, agent_sup_pid, :supervisor, _modules}] =
-      Supervisor.which_children(supervisor_pid)
+    [{_id, agent_sup_pid, :supervisor, _modules}] = Supervisor.which_children(supervisor_pid)
 
-    assert {:ok, _invocation_id} =
-             Hayata.Agent.run(agent_sup_pid, "DSL input")
+    assert {:ok, _invocation_id} = Hayata.Agent.run(agent_sup_pid, "DSL input")
 
     result = await_result(agent_sup_pid)
 
@@ -247,11 +270,9 @@ defmodule Hayata.AgentDSLTest do
         strategy: :one_for_one
       )
 
-    [{_id, agent_sup_pid, :supervisor, _modules}] =
-      Supervisor.which_children(supervisor_pid)
+    [{_id, agent_sup_pid, :supervisor, _modules}] = Supervisor.which_children(supervisor_pid)
 
-    assert {:ok, _invocation_id} =
-             Hayata.Agent.run(agent_sup_pid, "DSL input")
+    assert {:ok, _invocation_id} = Hayata.Agent.run(agent_sup_pid, "DSL input")
 
     result = await_result(agent_sup_pid)
 
@@ -317,6 +338,47 @@ defmodule Hayata.AgentDSLTest do
     assert node_result == %{
              answer: "input from explicit context"
            }
+  end
+
+  test "supports pattern matching on the complete decision context" do
+    config = PatternMatchingDecisionTestAgent.config()
+
+    pending_decision =
+      config.decision_policy.(%{
+        step: 0,
+        input: "work to process",
+        state: %{status: :pending}
+      })
+
+    assert pending_decision == {
+             :next,
+             :process,
+             "work to process"
+           }
+
+    completed_state = %{status: :completed}
+
+    completed_decision =
+      config.decision_policy.(%{
+        step: 1,
+        input: nil,
+        state: completed_state
+      })
+
+    assert completed_decision == {:finish, completed_state}
+  end
+
+  test "supports matching a specific step and context pattern" do
+    config = PatternMatchingDecisionTestAgent.config()
+
+    decision =
+      config.decision_policy.(%{
+        step: 0,
+        input: "test",
+        state: %{status: :pending}
+      })
+
+    assert decision == {:next, :process, "test"}
   end
 
   defp await_result(agent_sup_pid, attempts \\ 20)

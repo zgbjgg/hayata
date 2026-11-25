@@ -185,9 +185,12 @@ defmodule Hayata.Agent.DSL do
   end
 
   defp validate_unique_steps(steps) do
-    step_ids = Enum.map(steps, & &1.step)
+    literal_steps =
+      steps
+      |> Enum.map(& &1.step_pattern)
+      |> Enum.filter(&is_integer/1)
 
-    case length(step_ids) == MapSet.size(MapSet.new(step_ids)) do
+    case length(literal_steps) == MapSet.size(MapSet.new(literal_steps)) do
       true ->
         :ok
 
@@ -225,7 +228,9 @@ defmodule Hayata.Agent.DSL do
 
   defp parse_node_ids(names) do
     raise ArgumentError,
-          "parallel node identifiers must be a list of string literals, got: #{Macro.to_string(names)}"
+          "parallel node identifiers must be a list of string literals, got: #{
+            Macro.to_string(names)
+          }"
   end
 
   defp build_node_function([{:->, _metadata, _clauses} = clause]) do
@@ -253,32 +258,18 @@ defmodule Hayata.Agent.DSL do
     |> Enum.map(&parse_decision_step/1)
   end
 
-  # Legacy syntax:
-  # on_step 0 do
-  #   next "answer", input: :input
-  # end
-  defp parse_decision_step(
-         {:on_step, _metadata, [step, [do: body]]}
-       )
-       when is_integer(step) and step >= 0 do
+  defp parse_decision_step({:on_step, _metadata, [step_pattern, [do: body]]}) do
     %{
-      step: step,
-      context_variable: nil,
+      step_pattern: step_pattern,
+      context_pattern: {:context, [], nil},
       result: parse_decision_result(body)
     }
   end
 
-  # Explicit context syntax:
-  # on_step 0, context do
-  #   next "answer", input: context.input
-  # end
-  defp parse_decision_step(
-         {:on_step, _metadata, [step, {variable, _variable_metadata, nil}, [do: body]]}
-       )
-       when is_integer(step) and step >= 0 and is_atom(variable) do
+  defp parse_decision_step({:on_step, _metadata, [step_pattern, context_pattern, [do: body]]}) do
     %{
-      step: step,
-      context_variable: {variable, [], nil},
+      step_pattern: step_pattern,
+      context_pattern: context_pattern,
       result: parse_decision_result(body)
     }
   end
@@ -288,9 +279,7 @@ defmodule Hayata.Agent.DSL do
           "invalid decision step: #{Macro.to_string(expression)}"
   end
 
-  defp parse_decision_result(
-         {:parallel, _metadata, [names, options]}
-       )
+  defp parse_decision_result({:parallel, _metadata, [names, options]})
        when is_list(options) do
     node_ids = parse_node_ids(names)
     input = Keyword.fetch!(options, :input)
@@ -300,9 +289,7 @@ defmodule Hayata.Agent.DSL do
     end
   end
 
-  defp parse_decision_result(
-         {:next, _metadata, [name, options]}
-       )
+  defp parse_decision_result({:next, _metadata, [name, options]})
        when is_list(options) do
     node_id = parse_node_id(name)
     input = Keyword.fetch!(options, :input)
@@ -312,9 +299,7 @@ defmodule Hayata.Agent.DSL do
     end
   end
 
-  defp parse_decision_result(
-         {:finish, _metadata, [value]}
-       ) do
+  defp parse_decision_result({:finish, _metadata, [value]}) do
     quote do
       {:finish, unquote(context_value(value))}
     end
@@ -351,19 +336,31 @@ defmodule Hayata.Agent.DSL do
 
     decision_clauses =
       Enum.map(definition.decision, fn decision ->
-        result = bind_decision_context(decision)
+        pattern =
+          {:{}, [],
+           [
+             decision.step_pattern,
+             decision.context_pattern
+           ]}
 
         {:->, [],
          [
-           [decision.step],
-           result
+           [pattern],
+           decision.result
          ]}
       end)
+
+    decision_value =
+      {:{}, [],
+       [
+         {{:., [], [Map, :fetch!]}, [], [context_variable, :step]},
+         context_variable
+       ]}
 
     decision_case =
       {:case, [],
        [
-         {{:., [], [Map, :fetch!]}, [], [context_variable, :step]},
+         decision_value,
          [do: decision_clauses]
        ]}
 
