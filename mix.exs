@@ -21,7 +21,7 @@ defmodule Hayata.MixProject do
     [
       mod: {:hayata_app, []},
       registered: [:hayata_sup],
-      extra_applications: [:inets, :ssl, :telemetry]
+      extra_applications: [:inets, :ssl, :telemetry, :mnesia]
     ]
   end
 
