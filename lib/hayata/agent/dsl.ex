@@ -261,7 +261,7 @@ defmodule Hayata.Agent.DSL do
   defp parse_decision_step({:on_step, _metadata, [step_pattern, [do: body]]}) do
     %{
       step_pattern: step_pattern,
-      context_pattern: {:context, [], nil},
+      context_pattern: {:_context, [], nil},
       result: parse_decision_result(body)
     }
   end
@@ -277,6 +277,14 @@ defmodule Hayata.Agent.DSL do
   defp parse_decision_step(expression) do
     raise ArgumentError,
           "invalid decision step: #{Macro.to_string(expression)}"
+  end
+
+  defp parse_decision_result({:__block__, metadata, expressions})
+       when length(expressions) > 1 do
+    {preceding, [last]} = Enum.split(expressions, -1)
+
+    {:__block__, metadata,
+     preceding ++ [parse_decision_result(last)]}
   end
 
   defp parse_decision_result({:parallel, _metadata, [names, options]})
