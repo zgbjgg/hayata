@@ -109,6 +109,30 @@ defmodule Hayata.AgentDSLTest do
     end
   end
 
+
+  defmodule ExplicitContextTestAgent do
+    use Hayata.Agent
+
+    agent do
+      id "explicit_context_test_agent"
+
+      node "answer" do
+        context ->
+          %{answer: context.input}
+      end
+
+      decision do
+        on_step 0, context do
+          next "answer", input: context.input
+        end
+
+        on_step 1, context do
+          finish context.state
+        end
+      end
+    end
+  end
+
   test "generates the expected agent configuration" do
     config = TestAgent.config()
 
@@ -236,6 +260,28 @@ defmodule Hayata.AgentDSLTest do
     config = ConfiguredTestAgent.config()
 
     assert is_function(config.rag_config.retrieve, 2)
+  end
+
+  test "supports explicit context variables in decision steps" do
+    config = ExplicitContextTestAgent.config()
+
+    first_decision =
+      config.decision_policy.(%{
+        step: 0,
+        input: "explicit input"
+      })
+
+    assert first_decision == {:next, :answer, "explicit input"}
+
+    state = %{answer: "completed"}
+
+    second_decision =
+      config.decision_policy.(%{
+        step: 1,
+        state: state
+      })
+
+    assert second_decision == {:finish, state}
   end
 
   defp await_result(agent_sup_pid, attempts \\ 20)

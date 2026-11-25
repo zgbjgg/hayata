@@ -221,12 +221,32 @@ defmodule Hayata.Agent.DSL do
     |> Enum.map(&parse_decision_step/1)
   end
 
+  # Legacy syntax:
+  # on_step 0 do
+  #   next "answer", input: :input
+  # end
   defp parse_decision_step(
          {:on_step, _metadata, [step, [do: body]]}
        )
        when is_integer(step) and step >= 0 do
     %{
       step: step,
+      context_variable: nil,
+      result: parse_decision_result(body)
+    }
+  end
+
+  # Explicit context syntax:
+  # on_step 0, context do
+  #   next "answer", input: context.input
+  # end
+  defp parse_decision_step(
+         {:on_step, _metadata, [step, {variable, _variable_metadata, nil}, [do: body]]}
+       )
+       when is_integer(step) and step >= 0 and is_atom(variable) do
+    %{
+      step: step,
+      context_variable: {variable, [], nil},
       result: parse_decision_result(body)
     }
   end
@@ -299,10 +319,12 @@ defmodule Hayata.Agent.DSL do
 
     decision_clauses =
       Enum.map(definition.decision, fn decision ->
+        result = bind_decision_context(decision)
+
         {:->, [],
          [
            [decision.step],
-           decision.result
+           result
          ]}
       end)
 
@@ -337,6 +359,20 @@ defmodule Hayata.Agent.DSL do
       |> maybe_add(:rag_config, definition.rag_config)
 
     {:%{}, [], config_entries}
+  end
+
+  defp bind_decision_context(%{context_variable: nil, result: result}) do
+    result
+  end
+
+  defp bind_decision_context(%{
+         context_variable: context_variable,
+         result: result
+       }) do
+    quote do
+      unquote(context_variable) = var!(context)
+      unquote(result)
+    end
   end
 
   defp maybe_add(entries, _key, nil) do
