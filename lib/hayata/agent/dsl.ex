@@ -1,0 +1,408 @@
+defmodule Hayata.Agent.DSL do
+  @moduledoc """
+  Declarative DSL for defining Hayata agents.
+  """
+
+  defmacro agent(do: block) do
+    definition = parse_agent_block(block)
+
+    config = build_config(definition)
+    module = __CALLER__.module
+
+    quote do
+      def config do
+        unquote(config)
+      end
+
+      def __hayata_config__ do
+        config()
+      end
+
+      def child_spec(_argument) do
+        Hayata.Agent.child_spec(config())
+      end
+
+      def start_link(_argument) do
+        Hayata.Agent.start_link(config())
+      end
+
+      def __hayata_agent_module__ do
+        unquote(module)
+      end
+    end
+  end
+
+  defp parse_agent_block(block) do
+    expressions = block_expressions(block)
+
+    initial = %{
+      id: nil,
+      state: quote(do: %{}),
+      nodes: [],
+      decision: nil,
+      max_steps: nil,
+      execution_timeout: nil,
+      llm: nil,
+      conversation_memory: nil,
+      rag_config: nil
+    }
+
+    expressions
+    |> Enum.reduce(initial, &parse_agent_expression/2)
+    |> validate_agent_definition()
+  end
+
+  defp block_expressions({:__block__, _metadata, expressions}) do
+    expressions
+  end
+
+  defp block_expressions(expression) do
+    [expression]
+  end
+
+  defp parse_agent_expression({:id, _metadata, [value]}, definition) do
+    Map.put(definition, :id, value)
+  end
+
+  defp parse_agent_expression({:state, _metadata, [value]}, definition) do
+    Map.put(definition, :state, value)
+  end
+
+  defp parse_agent_expression(
+         {:max_steps, _metadata, [value]},
+         definition
+       ) do
+    Map.put(definition, :max_steps, value)
+  end
+
+  defp parse_agent_expression(
+         {:execution_timeout, _metadata, [value]},
+         definition
+       ) do
+    Map.put(definition, :execution_timeout, value)
+  end
+
+  defp parse_agent_expression({:llm, _metadata, [value]}, definition) do
+    Map.put(definition, :llm, value)
+  end
+
+  defp parse_agent_expression(
+         {:conversation_memory, _metadata, [value]},
+         definition
+       ) do
+    Map.put(definition, :conversation_memory, value)
+  end
+
+  defp parse_agent_expression({:rag_config, _metadata, [value]}, definition) do
+    Map.put(definition, :rag_config, value)
+  end
+
+  # Explicit context syntax:
+  # node "answer", context do
+  #   %{answer: context.input}
+  # end
+  defp parse_agent_expression(
+         {:node, _metadata, [name, {variable, _variable_metadata, nil}, [do: body]]},
+         definition
+       )
+       when is_atom(variable) do
+    node_id = parse_node_id(name)
+
+    node = %{
+      id: node_id,
+      function: build_node_function(body, {variable, [], nil})
+    }
+
+    nodes = [node | definition.nodes]
+
+    Map.put(definition, :nodes, nodes)
+  end
+
+  # Legacy syntax:
+  # node "answer" do
+  #   context ->
+  #     %{answer: context.input}
+  # end
+  defp parse_agent_expression(
+         {:node, _metadata, [name, [do: body]]},
+         definition
+       ) do
+    node_id = parse_node_id(name)
+
+    node = %{
+      id: node_id,
+      function: build_node_function(body)
+    }
+
+    nodes = [node | definition.nodes]
+
+    Map.put(definition, :nodes, nodes)
+  end
+
+  defp parse_agent_expression(
+         {:decision, _metadata, [[do: body]]},
+         definition
+       ) do
+    steps = parse_decision_block(body)
+
+    Map.put(definition, :decision, steps)
+  end
+
+  defp parse_agent_expression(expression, _definition) do
+    raise ArgumentError,
+          "unsupported Hayata agent definition: #{Macro.to_string(expression)}"
+  end
+
+  defp validate_agent_definition(%{id: nil}) do
+    raise ArgumentError, "Hayata agent definition requires an id"
+  end
+
+  defp validate_agent_definition(%{nodes: []}) do
+    raise ArgumentError, "Hayata agent definition requires at least one node"
+  end
+
+  defp validate_agent_definition(%{decision: nil}) do
+    raise ArgumentError, "Hayata agent definition requires a decision block"
+  end
+
+  defp validate_agent_definition(definition) do
+    validate_unique_nodes(definition.nodes)
+    validate_unique_steps(definition.decision)
+
+    definition
+  end
+
+  defp validate_unique_nodes(nodes) do
+    node_ids = Enum.map(nodes, & &1.id)
+
+    case length(node_ids) == MapSet.size(MapSet.new(node_ids)) do
+      true ->
+        :ok
+
+      false ->
+        raise ArgumentError, "Hayata agent contains duplicated node identifiers"
+    end
+  end
+
+  defp validate_unique_steps(steps) do
+    literal_steps =
+      steps
+      |> Enum.map(& &1.step_pattern)
+      |> Enum.filter(&is_integer/1)
+
+    case length(literal_steps) == MapSet.size(MapSet.new(literal_steps)) do
+      true ->
+        :ok
+
+      false ->
+        raise ArgumentError, "Hayata agent contains duplicated decision steps"
+    end
+  end
+
+  defp parse_node_id(name) when is_binary(name) do
+    String.to_atom(name)
+  end
+
+  defp parse_node_id(name) do
+    raise ArgumentError,
+          "node identifier must be a string literal, got: #{Macro.to_string(name)}"
+  end
+
+  defp parse_node_ids([]) do
+    raise ArgumentError,
+          "parallel requires at least one node identifier"
+  end
+
+  defp parse_node_ids(names) when is_list(names) do
+    node_ids = Enum.map(names, &parse_node_id/1)
+
+    case length(node_ids) == MapSet.size(MapSet.new(node_ids)) do
+      true ->
+        node_ids
+
+      false ->
+        raise ArgumentError,
+              "parallel contains duplicated node identifiers"
+    end
+  end
+
+  defp parse_node_ids(names) do
+    raise ArgumentError,
+          "parallel node identifiers must be a list of string literals, got: #{
+            Macro.to_string(names)
+          }"
+  end
+
+  defp build_node_function([{:->, _metadata, _clauses} = clause]) do
+    {:fn, [], [clause]}
+  end
+
+  defp build_node_function({:fn, _metadata, _clauses} = function) do
+    function
+  end
+
+  defp build_node_function(body) do
+    raise ArgumentError,
+          "node body must be an anonymous function, got: #{Macro.to_string(body)}"
+  end
+
+  defp build_node_function(body, context_variable) do
+    clause = {:->, [], [[context_variable], body]}
+
+    {:fn, [], [clause]}
+  end
+
+  defp parse_decision_block(block) do
+    block
+    |> block_expressions()
+    |> Enum.map(&parse_decision_step/1)
+  end
+
+  defp parse_decision_step({:on_step, _metadata, [step_pattern, [do: body]]}) do
+    %{
+      step_pattern: step_pattern,
+      context_pattern: {:_context, [], nil},
+      result: parse_decision_result(body)
+    }
+  end
+
+  defp parse_decision_step({:on_step, _metadata, [step_pattern, context_pattern, [do: body]]}) do
+    %{
+      step_pattern: step_pattern,
+      context_pattern: context_pattern,
+      result: parse_decision_result(body)
+    }
+  end
+
+  defp parse_decision_step(expression) do
+    raise ArgumentError,
+          "invalid decision step: #{Macro.to_string(expression)}"
+  end
+
+  defp parse_decision_result({:__block__, metadata, expressions})
+       when length(expressions) > 1 do
+    {preceding, [last]} = Enum.split(expressions, -1)
+
+    {:__block__, metadata,
+     preceding ++ [parse_decision_result(last)]}
+  end
+
+  defp parse_decision_result({:parallel, _metadata, [names, options]})
+       when is_list(options) do
+    node_ids = parse_node_ids(names)
+    input = Keyword.fetch!(options, :input)
+
+    quote do
+      {:next, unquote(node_ids), unquote(context_value(input))}
+    end
+  end
+
+  defp parse_decision_result({:next, _metadata, [name, options]})
+       when is_list(options) do
+    node_id = parse_node_id(name)
+    input = Keyword.fetch!(options, :input)
+
+    quote do
+      {:next, unquote(node_id), unquote(context_value(input))}
+    end
+  end
+
+  defp parse_decision_result({:finish, _metadata, [value]}) do
+    quote do
+      {:finish, unquote(context_value(value))}
+    end
+  end
+
+  defp parse_decision_result(expression) do
+    raise ArgumentError,
+          "unsupported decision result: #{Macro.to_string(expression)}"
+  end
+
+  defp context_value({:__aliases__, _metadata, _parts} = expression) do
+    expression
+  end
+
+  defp context_value(value) when is_atom(value) do
+    quote do
+      Map.fetch!(var!(context), unquote(value))
+    end
+  end
+
+  defp context_value(value) do
+    value
+  end
+
+  defp build_config(definition) do
+    nodes =
+      definition.nodes
+      |> Enum.reverse()
+      |> Enum.map(fn node ->
+        {node.id, node.function}
+      end)
+
+    context_variable = {:context, [], nil}
+
+    decision_clauses =
+      Enum.map(definition.decision, fn decision ->
+        pattern =
+          {:{}, [],
+           [
+             decision.step_pattern,
+             decision.context_pattern
+           ]}
+
+        {:->, [],
+         [
+           [pattern],
+           decision.result
+         ]}
+      end)
+
+    decision_value =
+      {:{}, [],
+       [
+         {{:., [], [Map, :fetch!]}, [], [context_variable, :step]},
+         context_variable
+       ]}
+
+    decision_case =
+      {:case, [],
+       [
+         decision_value,
+         [do: decision_clauses]
+       ]}
+
+    decision_policy =
+      {:fn, [],
+       [
+         {:->, [],
+          [
+            [context_variable],
+            decision_case
+          ]}
+       ]}
+
+    config_entries =
+      [
+        {:id, definition.id},
+        {:state, definition.state},
+        {:nodes, {:%{}, [], nodes}},
+        {:decision_policy, decision_policy}
+      ]
+      |> maybe_add(:max_steps, definition.max_steps)
+      |> maybe_add(:execution_timeout, definition.execution_timeout)
+      |> maybe_add(:llm, definition.llm)
+      |> maybe_add(:conversation_memory, definition.conversation_memory)
+      |> maybe_add(:rag_config, definition.rag_config)
+
+    {:%{}, [], config_entries}
+  end
+
+  defp maybe_add(entries, _key, nil) do
+    entries
+  end
+
+  defp maybe_add(entries, key, value) do
+    entries ++ [{key, value}]
+  end
+end

@@ -25,6 +25,9 @@
         "rebar.config.script",
         "rebar.lock",
         "README.md",
-        "LICENSE.md"
+        "LICENSE.md",
+        "mix.exs",
+        "README_ELIXIR.md",
+        "lib/**/*"
     ]}
 ]}.
