@@ -19,14 +19,12 @@ defmodule Hayata.AgentTest do
     test "starts an agent under an Elixir supervisor" do
       config = agent_config()
 
-      {supervisor_pid, agent_sup_pid} =
-        start_agent_supervisor(config)
+      {supervisor_pid, agent_sup_pid} = start_agent_supervisor(config)
 
       assert Process.alive?(supervisor_pid)
       assert Process.alive?(agent_sup_pid)
 
-      assert {:ok, agent_pid} =
-               Hayata.Agent.coordinator(agent_sup_pid)
+      assert {:ok, agent_pid} = Hayata.Agent.coordinator(agent_sup_pid)
 
       assert Process.alive?(agent_pid)
     end
@@ -36,8 +34,7 @@ defmodule Hayata.AgentTest do
     test "runs an agent and returns its result" do
       config = agent_config()
 
-      {_supervisor_pid, agent_sup_pid} =
-        start_agent_supervisor(config)
+      {_supervisor_pid, agent_sup_pid} = start_agent_supervisor(config)
 
       assert {:ok, invocation_id} =
                agent_sup_pid
@@ -45,8 +42,7 @@ defmodule Hayata.AgentTest do
 
       assert is_reference(invocation_id)
 
-      assert {:ok, %{answer: "Hello from Hayata: Elixir"}} =
-               await_result(agent_sup_pid, 100)
+      assert {:ok, %{answer: "Hello from Hayata: Elixir"}} = await_result(agent_sup_pid, 100)
     end
   end
 
@@ -54,13 +50,11 @@ defmodule Hayata.AgentTest do
     test "returns the current state and operational information" do
       config = agent_config()
 
-      {_supervisor_pid, agent_sup_pid} =
-        start_agent_supervisor(config)
+      {_supervisor_pid, agent_sup_pid} = start_agent_supervisor(config)
 
       assert %{} = Hayata.Agent.state(agent_sup_pid)
 
-      assert %{status: :ready} =
-               Hayata.Agent.info(agent_sup_pid)
+      assert %{status: :ready} = Hayata.Agent.info(agent_sup_pid)
     end
   end
 
@@ -68,8 +62,7 @@ defmodule Hayata.AgentTest do
     test "stops the complete agent tree with its parent supervisor" do
       config = agent_config()
 
-      {supervisor_pid, agent_sup_pid} =
-        start_agent_supervisor(config)
+      {supervisor_pid, agent_sup_pid} = start_agent_supervisor(config)
 
       monitor_ref = Process.monitor(agent_sup_pid)
 
@@ -88,13 +81,11 @@ defmodule Hayata.AgentTest do
     test "stops the complete agent supervision tree" do
       config = agent_config()
 
-      {:ok, agent_sup_pid} =
-        Hayata.Agent.start_link(config)
+      {:ok, agent_sup_pid} = Hayata.Agent.start_link(config)
 
       monitor_ref = Process.monitor(agent_sup_pid)
 
-      assert {:ok, agent_pid} =
-               Hayata.Agent.coordinator(agent_sup_pid)
+      assert {:ok, agent_pid} = Hayata.Agent.coordinator(agent_sup_pid)
 
       assert Process.alive?(agent_pid)
 
@@ -147,8 +138,7 @@ defmodule Hayata.AgentTest do
       Process.exit(supervisor_pid, :shutdown)
     end)
 
-    [{_id, agent_sup_pid, :supervisor, _modules}] =
-      Supervisor.which_children(supervisor_pid)
+    [{_id, agent_sup_pid, :supervisor, _modules}] = Supervisor.which_children(supervisor_pid)
 
     {supervisor_pid, agent_sup_pid}
   end

@@ -1,4 +1,3 @@
-
 defmodule Hayata.MixProject do
   use Mix.Project
 
