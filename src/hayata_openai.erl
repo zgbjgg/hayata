@@ -19,10 +19,10 @@
 -define(DEFAULT_BASE_URL, <<"https://api.openai.com/v1">>).
 -define(DEFAULT_TIMEOUT, 30000).
 
--if(?OTP_RELEASE >= 25).
--define(CACERTS, public_key:cacerts_get()).
+-ifdef(OTP_RELEASE).
+-define(OTP_VERSION, ?OTP_RELEASE).
 -else.
--define(CACERTS, []).
+-define(OTP_VERSION, 0).
 -endif.
 
 %% @doc Returns the capabilities currently implemented by the OpenAI adapter.
@@ -472,12 +472,8 @@ send_request(Payload, ApiKey, Config) ->
     Body = iolist_to_binary(json:encode(Payload)),
     HttpOptions = [
         {timeout, Timeout},
-        {connect_timeout, Timeout},
-        {ssl, [
-            {verify, verify_peer},
-            {cacerts, ?CACERTS}
-        ]}
-    ],
+        {connect_timeout, Timeout}
+    ] ++ ssl_options(),
     Request = {
         Url,
         Headers,
@@ -515,12 +511,8 @@ send_stream_request(Payload, ApiKey, Config, Consumer) ->
     Body = iolist_to_binary(json:encode(StreamPayload)),
     HttpOptions = [
         {timeout, Timeout},
-        {connect_timeout, Timeout},
-        {ssl, [
-            {verify, verify_peer},
-            {cacerts, ?CACERTS}
-        ]}
-    ],
+        {connect_timeout, Timeout}
+    ] ++ ssl_options(),
     Request = {Url, Headers, "application/json", Body},
     RequestOptions = [
         {sync, false},
@@ -1147,3 +1139,16 @@ stream_event(Type, GenerationId, Data) ->
         generation_id => GenerationId,
         data => Data
     }.
+
+ssl_options() ->
+    case ?OTP_VERSION >= 25 of
+        true ->
+            [
+                {ssl, [
+                    {verify, verify_peer},
+                    {cacerts, public_key:cacerts_get()}
+                ]}
+            ];
+        false ->
+            []
+    end.
