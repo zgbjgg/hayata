@@ -55,7 +55,7 @@ For Elixir applications, see the [Elixir integration guide](README_ELIXIR.md).
 
 ## Requirements
 
--   Erlang/OTP 29.1.1 (target runtime)
+-   Erlang/OTP 22.3 or later
 -   Rebar3
 
 ## Build and test
