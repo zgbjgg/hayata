@@ -73,6 +73,42 @@ defmodule Hayata.AgentDSLTest do
     end
   end
 
+  defmodule ConfiguredTestAgent do
+    use Hayata.Agent
+
+    agent do
+      id "configured_test_agent"
+
+      llm %{
+        adapter: :test_adapter,
+        model: "test-model"
+      }
+
+      conversation_memory true
+
+      rag_config %{
+        retrieve: fn _query, _options ->
+          {:ok, %{documents: []}}
+        end
+      }
+
+      node "answer" do
+        context ->
+          %{answer: context.input}
+      end
+
+      decision do
+        on_step 0 do
+          next "answer", input: :input
+        end
+
+        on_step 1 do
+          finish :state
+        end
+      end
+    end
+  end
+
   test "generates the expected agent configuration" do
     config = TestAgent.config()
 
@@ -179,6 +215,27 @@ defmodule Hayata.AgentDSLTest do
            ]
 
     assert :ok == Supervisor.stop(supervisor_pid)
+  end
+
+  test "generates LLM configuration" do
+    config = ConfiguredTestAgent.config()
+
+    assert config.llm == %{
+             adapter: :test_adapter,
+             model: "test-model"
+           }
+  end
+
+  test "generates conversation memory configuration" do
+    config = ConfiguredTestAgent.config()
+
+    assert config.conversation_memory
+  end
+
+  test "generates RAG configuration" do
+    config = ConfiguredTestAgent.config()
+
+    assert is_function(config.rag_config.retrieve, 2)
   end
 
   defp await_result(agent_sup_pid, attempts \\ 20)

@@ -41,7 +41,10 @@ defmodule Hayata.Agent.DSL do
       nodes: [],
       decision: nil,
       max_steps: nil,
-      execution_timeout: nil
+      execution_timeout: nil,
+      llm: nil,
+      conversation_memory: nil,
+      rag_config: nil
     }
 
     expressions
@@ -77,6 +80,21 @@ defmodule Hayata.Agent.DSL do
          definition
        ) do
     Map.put(definition, :execution_timeout, value)
+  end
+
+  defp parse_agent_expression({:llm, _metadata, [value]}, definition) do
+    Map.put(definition, :llm, value)
+  end
+
+  defp parse_agent_expression(
+         {:conversation_memory, _metadata, [value]},
+         definition
+       ) do
+    Map.put(definition, :conversation_memory, value)
+  end
+
+  defp parse_agent_expression({:rag_config, _metadata, [value]}, definition) do
+    Map.put(definition, :rag_config, value)
   end
 
   defp parse_agent_expression(
@@ -314,6 +332,9 @@ defmodule Hayata.Agent.DSL do
       ]
       |> maybe_add(:max_steps, definition.max_steps)
       |> maybe_add(:execution_timeout, definition.execution_timeout)
+      |> maybe_add(:llm, definition.llm)
+      |> maybe_add(:conversation_memory, definition.conversation_memory)
+      |> maybe_add(:rag_config, definition.rag_config)
 
     {:%{}, [], config_entries}
   end
