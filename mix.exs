@@ -62,7 +62,8 @@ defmodule Hayata.MixProject do
         "rebar.config.script",
         "rebar.lock",
         "README.md",
-        "LICENSE.md"
+        "LICENSE.md",
+        "README_ELIXIR.md",
       ]
     ]
   end
