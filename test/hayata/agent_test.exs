@@ -84,6 +84,31 @@ defmodule Hayata.AgentTest do
     end
   end
 
+  describe "stop/1" do
+    test "stops the complete agent supervision tree" do
+      config = agent_config()
+
+      {:ok, agent_sup_pid} =
+        Hayata.Agent.start_link(config)
+
+      monitor_ref = Process.monitor(agent_sup_pid)
+
+      assert {:ok, agent_pid} =
+               Hayata.Agent.coordinator(agent_sup_pid)
+
+      assert Process.alive?(agent_pid)
+
+      assert :ok = Hayata.Agent.stop(agent_sup_pid)
+
+      assert_receive(
+        {:DOWN, ^monitor_ref, :process, ^agent_sup_pid, _reason},
+        1000
+      )
+
+      refute Process.alive?(agent_sup_pid)
+    end
+  end
+
   defp agent_config do
     %{
       id: {:agent_test, make_ref()},

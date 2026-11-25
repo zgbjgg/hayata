@@ -136,4 +136,18 @@ defmodule Hayata.Agent do
         {:error, reason}
     end
   end
+
+  @doc """
+  Stops the agent and its complete supervision tree.
+  """
+  @spec stop(pid()) :: :ok | {:error, term()}
+  def stop(agent_sup_pid) when is_pid(agent_sup_pid) do
+    case coordinator(agent_sup_pid) do
+      {:ok, agent_pid} ->
+        :hayata_agent.stop(agent_pid)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
 end
