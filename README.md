@@ -17,6 +17,8 @@ graph-oriented model is inspired by agent orchestration frameworks such
 as LangGraph, while exposing an Erlang/OTP-native runtime rather than a
 feature-for-feature clone of another API.
 
+For Elixir applications, see the [Elixir integration guide](README_ELIXIR.md).
+
 ## Highlights
 
 -   Graph-based agent execution with a configurable decision policy.
