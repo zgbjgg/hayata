@@ -57,6 +57,7 @@ defmodule Hayata.MixProject do
         "src",
         "compat",
         "include",
+        "lib",
         "mix.exs",
         "rebar.config",
         "rebar.config.script",
