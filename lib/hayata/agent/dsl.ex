@@ -398,20 +398,6 @@ defmodule Hayata.Agent.DSL do
     {:%{}, [], config_entries}
   end
 
-  defp bind_decision_context(%{context_variable: nil, result: result}) do
-    result
-  end
-
-  defp bind_decision_context(%{
-         context_variable: context_variable,
-         result: result
-       }) do
-    quote do
-      unquote(context_variable) = var!(context)
-      unquote(result)
-    end
-  end
-
   defp maybe_add(entries, _key, nil) do
     entries
   end
